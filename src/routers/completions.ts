@@ -5,8 +5,16 @@ import { z } from "zod"
 
 import { db, requestLog } from "@/lib/db"
 import { logger, getTracer, spanError, SpanStatusCode, completionRequestCounter, completionTokensCounter, completionLatency, activeCompletions, type Span } from "@/lib/telemetry"
-import { getBedrockModel, resolveBedrockModelId, listAvailableModels } from "@/providers/bedrock"
+import { registry } from "@/providers/registry"
+import { _toolSchemaCache } from "@/providers/bedrock"
 import { tryWithFallback, isRetryableError } from "@/lib/fallback"
+import { parseConfig, type SummonedConfig } from "@/lib/config"
+import { calculateCost } from "@/lib/pricing"
+import { pushLog } from "@/lib/log-buffer"
+import { getCacheKey, getCachedResponse, setCachedResponse } from "@/lib/cache"
+import { runGuardrails } from "@/lib/guardrails"
+import { resolveVirtualKey, createEphemeralProvider } from "@/lib/provider-resolve"
+import { recordSuccess, recordFailure } from "@/lib/circuit-breaker"
 import type { AuthContext } from "@/middlewares/auth"
 
 const tracer = getTracer()
@@ -42,16 +50,17 @@ const completionRequestSchema = z.object({
   tool_choice: z.any().optional(),
   top_p: z.number().optional(),
   stop: z.union([z.string(), z.array(z.string())]).optional(),
-  fallback_models: z.array(z.string()).max(3).optional(),
+  fallback_models: z.array(z.string()).max(5).optional(),
+  config: z.any().optional(),
 }).passthrough()
 
 // ---------------------------------------------------------------------------
-// Helpers — convert OpenAI format ↔ Vercel AI SDK format
+// Helpers — convert OpenAI format <-> Vercel AI SDK format
 // ---------------------------------------------------------------------------
 
 function openAiMessagesToCore(messages: z.infer<typeof messageSchema>[]): { system?: string; messages: ModelMessage[] } {
   let system: string | undefined
-  const coreMessages: ModelMessage[] = []
+  const coreMessages: any[] = []
 
   for (const msg of messages) {
     if (msg.role === "system") {
@@ -70,9 +79,9 @@ function openAiMessagesToCore(messages: z.infer<typeof messageSchema>[]): { syst
     if (msg.role === "assistant") {
       if (msg.tool_calls?.length) {
         coreMessages.push({
-          role: "assistant",
+          role: "assistant" as const,
           content: msg.tool_calls.map((tc: any) => ({
-            type: "tool-call",
+            type: "tool-call" as const,
             toolCallId: tc.id,
             toolName: tc.function.name,
             args: JSON.parse(tc.function.arguments ?? "{}"),
@@ -87,12 +96,12 @@ function openAiMessagesToCore(messages: z.infer<typeof messageSchema>[]): { syst
 
     if (msg.role === "tool") {
       coreMessages.push({
-        role: "tool",
+        role: "tool" as const,
         content: [{
-          type: "tool-result",
+          type: "tool-result" as const,
           toolCallId: msg.tool_call_id ?? "",
           toolName: msg.name ?? "",
-          result: typeof msg.content === "string" ? msg.content : msg.content,
+          content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
         }],
       })
     }
@@ -101,10 +110,6 @@ function openAiMessagesToCore(messages: z.infer<typeof messageSchema>[]): { syst
   return { system, messages: coreMessages }
 }
 
-/**
- * Strip fields from JSON Schema that Bedrock rejects ($schema, additionalProperties).
- * Recurse into nested objects and array items.
- */
 function cleanSchemaForBedrock(schema: Record<string, unknown>): Record<string, unknown> {
   const cleaned = { ...schema }
   delete cleaned["$schema"]
@@ -124,9 +129,6 @@ function cleanSchemaForBedrock(schema: Record<string, unknown>): Record<string, 
   return cleaned
 }
 
-// Store original clean schemas so the fetch interceptor can replace broken ones
-const _toolSchemaCache = new Map<string, Record<string, unknown>>()
-
 function openAiToolsToTools(tools: z.infer<typeof toolSchema>[]): Record<string, any> {
   const result: Record<string, any> = {}
   _toolSchemaCache.clear()
@@ -143,7 +145,7 @@ function openAiToolsToTools(tools: z.infer<typeof toolSchema>[]): Record<string,
   return result
 }
 
-/** Exported for the fetch interceptor in bedrock.ts */
+// Re-export for bedrock fetch interceptor
 export { _toolSchemaCache }
 
 // ---------------------------------------------------------------------------
@@ -152,15 +154,55 @@ export { _toolSchemaCache }
 
 export const completionsRouter = new Hono<{ Variables: AuthContext }>()
 
-type CompletionContext = { Variables: AuthContext }
+// Helper: write to DB + push to in-memory log buffer
+function emitLog(vals: {
+  id: string; apiKeyId: string; tenantId: string; userId?: string | null; organizationId?: string | null;
+  requestedModel: string; resolvedModel: string; provider: string;
+  inputTokens?: number; outputTokens?: number; latencyMs: number;
+  streaming: boolean; status: "success" | "error"; errorMessage?: string;
+  costUsd?: number; costInr?: number; cacheHit?: boolean;
+}) {
+  db.insert(requestLog).values(vals).catch((err: unknown) => logger.error({ err }, "failed to write request log"))
+  pushLog({
+    id: vals.id,
+    timestamp: new Date().toISOString(),
+    provider: vals.provider,
+    requestedModel: vals.requestedModel,
+    resolvedModel: vals.resolvedModel,
+    inputTokens: vals.inputTokens ?? 0,
+    outputTokens: vals.outputTokens ?? 0,
+    latencyMs: vals.latencyMs,
+    streaming: vals.streaming,
+    status: vals.status,
+    costUsd: vals.costUsd ?? 0,
+    costInr: vals.costInr ?? 0,
+    tenantId: vals.tenantId,
+    apiKeyId: vals.apiKeyId,
+    userId: vals.userId,
+    errorMessage: vals.errorMessage,
+  })
+}
 
-// GET /v1/models — list available models (OpenAI compat)
-completionsRouter.get("/models", (c: Parameters<Parameters<typeof completionsRouter.get>[1]>[0]) => {
-  return c.json({ object: "list", data: listAvailableModels() })
+// GET /v1/models — list registered providers
+// The gateway is a pure proxy: it doesn't maintain a static model catalog.
+// Users specify models as "provider/model-id" and the upstream validates.
+completionsRouter.get("/models", (c: any) => {
+  const providers = registry.all().map((p) => ({
+    id: p.id,
+    object: "provider" as const,
+    name: p.name,
+    supportsEmbeddings: !!p.getEmbeddingModel,
+    usage: `Use "${p.id}/<model-id>" in the model field, e.g. "${p.id}/gpt-4o"`,
+  }))
+  return c.json({
+    object: "list",
+    data: providers,
+    hint: "This gateway proxies requests to providers. Use 'provider/model-id' format.",
+  })
 })
 
-// POST /v1/chat/completions — main completion endpoint
-completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<typeof completionsRouter.post>[1]>[0]) => {
+// POST /v1/chat/completions — main completion endpoint (multi-provider)
+completionsRouter.post("/chat/completions", async (c: any) => {
   const apiKeyId = c.get("apiKeyId")
   const tenantId = c.get("tenantId")
   const userId = c.req.header("x-user-id") ?? null
@@ -177,15 +219,65 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
 
   const req = parsed.data
 
-  // Build the model chain: primary first, then customer-defined fallbacks
-  const modelChain = [req.model, ...(req.fallback_models ?? [])]
+  // Parse config from header or body
+  const config = parseConfig(c.req.header("x-summoned-config"), req.config)
+  const traceId = config?.traceId ?? c.req.header("x-trace-id") ?? requestId
+
+  // Build the model chain: primary + config fallbacks + body fallbacks
+  const configFallbacks = config?.fallback ?? []
+  const bodyFallbacks = req.fallback_models ?? []
+  const modelChain = [req.model, ...configFallbacks, ...bodyFallbacks]
+
+  // --- Input guardrails ---
+  if (config?.guardrails?.input?.length) {
+    const inputText = req.messages
+      .map((m: any) => typeof m.content === "string" ? m.content : JSON.stringify(m.content))
+      .join("\n")
+    const guardResult = runGuardrails(inputText, config.guardrails.input)
+    if (!guardResult.passed) {
+      return c.json({
+        error: {
+          code: "GUARDRAIL_VIOLATION",
+          message: "Input blocked by guardrails",
+          violations: guardResult.violations,
+        },
+      }, 400)
+    }
+  }
 
   const logId = nanoid()
   const startTime = Date.now()
 
+  // --- Cache check (non-streaming only) ---
+  let cacheHit = false
+  if (config?.cache && !req.stream) {
+    const cacheKey = await getCacheKey({
+      model: req.model,
+      messages: req.messages,
+      temperature: req.temperature,
+      max_tokens: req.max_tokens,
+    })
+    const cached = await getCachedResponse(cacheKey)
+    if (cached) {
+      cacheHit = true
+      const latencyMs = Date.now() - startTime
+      emitLog({
+        id: logId, apiKeyId, tenantId, userId, organizationId,
+        requestedModel: req.model, resolvedModel: req.model, provider: "cache",
+        latencyMs, streaming: false, status: "success", cacheHit: true,
+      })
+      return c.json(cached, 200, {
+        "X-Summoned-Cache": "HIT",
+        "X-Summoned-Trace-Id": traceId,
+        "X-Summoned-Latency-Ms": String(latencyMs),
+      })
+    }
+  }
+
   return tracer.startActiveSpan("gateway.completion", async (span: Span) => {
     span.setAttributes({
       "gateway.request_id": requestId,
+      "gateway.trace_id": traceId,
       "gateway.tenant_id": tenantId,
       "llm.model.requested": req.model,
       "llm.model.chain": modelChain.join(","),
@@ -203,38 +295,57 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
       ...(req.max_tokens ? { maxTokens: req.max_tokens } : {}),
     }
 
-    // -------------------------------------------------------------------------
-    // Non-streaming — full transparent fallback across the chain
-    // -------------------------------------------------------------------------
+    // Apply timeout if configured
+    const abortController = config?.timeout ? new AbortController() : undefined
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+    if (config?.timeout && abortController) {
+      timeoutHandle = setTimeout(() => abortController.abort(), config.timeout)
+    }
+
+    // -----------------------------------------------------------------------
+    // Non-streaming
+    // -----------------------------------------------------------------------
 
     if (!req.stream) {
       try {
-        const { result, modelAlias, attemptIndex, fallbackAttempts } = await tryWithFallback(
+        const { result, modelAlias, attemptIndex, totalRetries, fallbackAttempts } = await tryWithFallback(
           modelChain,
           async (alias) => {
-            const model = await getBedrockModel(alias)
-            const r = await generateText({ ...baseOptions, model })
-            return { r, resolvedModel: resolveBedrockModelId(alias) }
+            const { model, provider, modelId } = registry.getModel(alias)
+            const r = await generateText({
+              ...baseOptions,
+              model,
+              ...(abortController ? { abortSignal: abortController.signal } : {}),
+            })
+            recordSuccess(provider.id)
+            return { r, provider, modelId }
           },
+          config,
         )
 
-        const { r, resolvedModel } = result
-        const latencyMs = Date.now() - startTime
-        const inputTokens = r.usage?.promptTokens ?? 0
-        const outputTokens = r.usage?.completionTokens ?? 0
+        if (timeoutHandle) clearTimeout(timeoutHandle)
 
-        completionRequestCounter.inc({ provider: "bedrock", model: resolvedModel, status: "success" })
-        completionTokensCounter.inc({ provider: "bedrock", model: resolvedModel, type: "input" }, inputTokens)
-        completionTokensCounter.inc({ provider: "bedrock", model: resolvedModel, type: "output" }, outputTokens)
-        completionLatency.observe({ provider: "bedrock", model: resolvedModel }, latencyMs / 1000)
+        const { r, provider, modelId } = result
+        const latencyMs = Date.now() - startTime
+        const inputTokens = (r.usage as any)?.promptTokens ?? (r.usage as any)?.inputTokens ?? 0
+        const outputTokens = (r.usage as any)?.completionTokens ?? (r.usage as any)?.outputTokens ?? 0
+        const cost = calculateCost(provider.id, modelId, inputTokens, outputTokens)
+
+        completionRequestCounter.inc({ provider: provider.id, model: modelId, status: "success" })
+        completionTokensCounter.inc({ provider: provider.id, model: modelId, type: "input" }, inputTokens)
+        completionTokensCounter.inc({ provider: provider.id, model: modelId, type: "output" }, outputTokens)
+        completionLatency.observe({ provider: provider.id, model: modelId }, latencyMs / 1000)
 
         span.setAttributes({
+          "llm.provider": provider.id,
           "llm.model.served_by": modelAlias,
-          "llm.model.resolved": resolvedModel,
+          "llm.model.resolved": modelId,
           "llm.fallback_attempts": attemptIndex,
+          "llm.retries": totalRetries,
           "llm.input_tokens": inputTokens,
           "llm.output_tokens": outputTokens,
           "llm.latency_ms": latencyMs,
+          "llm.cost_usd": cost.costUsd,
         })
         span.setStatus({ code: SpanStatusCode.OK })
 
@@ -254,57 +365,91 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
             }]
           : [{ index: 0, message: { role: "assistant", content: r.text }, finish_reason: "stop" }]
 
+        // --- Output guardrails ---
+        const outputText = r.text ?? ""
+        if (config?.guardrails?.output?.length) {
+          const guardResult = runGuardrails(outputText, config.guardrails.output)
+          if (!guardResult.passed) {
+            span.end()
+            return c.json({
+              error: {
+                code: "GUARDRAIL_VIOLATION",
+                message: "Output blocked by guardrails",
+                violations: guardResult.violations,
+              },
+            }, 400, { "X-Summoned-Trace-Id": traceId })
+          }
+        }
+
         const response = {
           id: `chatcmpl-${nanoid(29)}`,
           object: "chat.completion",
           created: Math.floor(Date.now() / 1000),
-          // Always report the original requested model — customer's code doesn't need to know we fell back
           model: req.model,
           choices,
           usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens },
-          // Summoned-specific: expose which model actually served + what failed
           summoned: {
+            provider: provider.id,
             served_by: modelAlias,
+            resolved_model: modelId,
             fallback_attempts: fallbackAttempts,
+            retries: totalRetries,
+            cost: cost,
+            latency_ms: latencyMs,
+            cache: false,
           },
         }
 
-        db.insert(requestLog).values({
+        // --- Cache write ---
+        if (config?.cache && !req.stream) {
+          const ck = await getCacheKey({ model: req.model, messages: req.messages, temperature: req.temperature, max_tokens: req.max_tokens })
+          setCachedResponse(ck, response, config.cacheTtl)
+        }
+
+        emitLog({
           id: logId, apiKeyId, tenantId, userId, organizationId,
-          requestedModel: req.model, resolvedModel, provider: "bedrock",
+          requestedModel: req.model, resolvedModel: modelId, provider: provider.id,
           inputTokens, outputTokens, latencyMs, streaming: false, status: "success",
-        }).catch((err: unknown) => logger.error({ err }, "failed to write request log"))
+          costUsd: cost.costUsd, costInr: cost.costInr,
+        })
 
         span.end()
 
-        // Tell the client which model actually served via response header
-        return c.json(response, 200, { "X-Summoned-Served-By": modelAlias })
+        return c.json(response, 200, {
+          "X-Summoned-Provider": provider.id,
+          "X-Summoned-Served-By": modelAlias,
+          "X-Summoned-Cost-USD": cost.costUsd.toFixed(6),
+          "X-Summoned-Latency-Ms": String(latencyMs),
+          "X-Summoned-Trace-Id": traceId,
+          "X-Summoned-Cache": "MISS",
+        })
       } catch (err) {
+        if (timeoutHandle) clearTimeout(timeoutHandle)
+        recordFailure(modelChain[0]?.split("/")[0] ?? "unknown")
         spanError(span, err)
         span.end()
         const latencyMs = Date.now() - startTime
 
-        completionRequestCounter.inc({ provider: "bedrock", model: req.model, status: "error" })
+        completionRequestCounter.inc({ provider: "unknown", model: req.model, status: "error" })
 
-        db.insert(requestLog).values({
+        emitLog({
           id: logId, apiKeyId, tenantId, userId, organizationId,
-          requestedModel: req.model, resolvedModel: req.model, provider: "bedrock",
+          requestedModel: req.model, resolvedModel: req.model, provider: "unknown",
           latencyMs, streaming: false, status: "error",
           errorMessage: err instanceof Error ? err.message : String(err),
-        }).catch(() => {})
+        })
 
         logger.error({ err, requestId, tenantId, modelChain }, "all models in chain failed")
-        return c.json({ error: { code: "UPSTREAM_ERROR", message: "All models in fallback chain failed", requestId } }, 502)
+        return c.json({ error: { code: "UPSTREAM_ERROR", message: "All models in fallback chain failed", requestId } }, 502, {
+          "X-Summoned-Trace-Id": traceId,
+          "X-Summoned-Latency-Ms": String(latencyMs),
+        })
       }
     }
 
-    // -------------------------------------------------------------------------
-    // Streaming — fallback before first content chunk reaches the client.
-    // Strategy: try each model in the chain, buffer chunks until we confirm the
-    // stream is healthy (first text-delta or tool-call-start received).
-    // Only then open the SSE response and flush the buffer + continue streaming.
-    // If the stream fails before any content, silently try the next model.
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Streaming — fallback before first content chunk reaches the client
+    // -----------------------------------------------------------------------
 
     activeCompletions.inc()
     const completionId = `chatcmpl-${nanoid(29)}`
@@ -312,13 +457,15 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
     const encoder = new TextEncoder()
 
     let servedByAlias = req.model
+    let servedByProvider = "unknown"
+    let servedByModelId = req.model
     let streamingFallbackAttempts: Array<{ model: string; error: string }> = []
 
-    // Try each model until we get a working stream or exhaust the chain
     type BufferedStream = {
       bufferedChunks: Uint8Array[]
       fullStream: AsyncIterable<any>
-      resolvedModel: string
+      providerId: string
+      modelId: string
       modelAlias: string
     }
 
@@ -326,50 +473,48 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
 
     for (let i = 0; i < modelChain.length; i++) {
       const alias = modelChain[i]
-      const resolvedModel = resolveBedrockModelId(alias)
       const isLast = i === modelChain.length - 1
 
       try {
-        const model = await getBedrockModel(alias)
-        const stream = streamText({ ...baseOptions, model })
+        const { model, provider, modelId } = registry.getModel(alias)
+        const stream = streamText({
+          ...baseOptions,
+          model,
+          ...(abortController ? { abortSignal: abortController.signal } : {}),
+        })
 
-        // Buffer chunks until we get the first meaningful content
-        // This confirms the model accepted the request before we commit to the response
         const bufferedChunks: Uint8Array[] = []
         const baseChunk = { id: completionId, object: "chat.completion.chunk", created, model: req.model }
 
-        // Send role header chunk (buffered)
         const roleChunk = encoder.encode(
           `data: ${JSON.stringify({ ...baseChunk, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] })}\n\n`
         )
         bufferedChunks.push(roleChunk)
 
-        // Peek at the stream — get the async iterator
         const iter = stream.fullStream[Symbol.asyncIterator]()
         let firstContentSeen = false
         const pendingParts: any[] = []
 
-        // Read up to first content part to confirm stream is healthy
         while (!firstContentSeen) {
           const { value: part, done } = await iter.next()
           if (done) break
 
           pendingParts.push(part)
 
-          if (part.type === "text-delta" || part.type === "tool-call-streaming-start") {
+          if (part.type === "text-delta" || (part as any).type === "text-start" || (part as any).type === "tool-call-streaming-start") {
             firstContentSeen = true
           } else if (part.type === "error") {
-            throw new Error(part.error?.message ?? "Stream error before content")
+            throw new Error((part as any).error?.message ?? "Stream error before content")
           }
         }
 
-        // Stream is healthy — buffer the peeked parts and mark this model as the winner
         const toolCallIndexMap = new Map<string, number>()
         let toolCallIndexCounter = 0
 
         function partToChunk(part: any): Uint8Array | null {
           if (part.type === "text-delta") {
-            return encoder.encode(`data: ${JSON.stringify({ ...baseChunk, choices: [{ index: 0, delta: { content: part.textDelta }, finish_reason: null }] })}\n\n`)
+            const content = part.text ?? part.textDelta ?? ""
+            return encoder.encode(`data: ${JSON.stringify({ ...baseChunk, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`)
           }
           if (part.type === "tool-call-streaming-start") {
             const idx = toolCallIndexCounter++
@@ -388,28 +533,19 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
           if (chunk) bufferedChunks.push(chunk)
         }
 
-        activeStream = { bufferedChunks, fullStream: { [Symbol.asyncIterator]: () => iter }, resolvedModel, modelAlias: alias }
+        activeStream = {
+          bufferedChunks,
+          fullStream: { [Symbol.asyncIterator]: () => iter },
+          providerId: provider.id,
+          modelId,
+          modelAlias: alias,
+        }
         servedByAlias = alias
+        servedByProvider = provider.id
+        servedByModelId = modelId
 
         if (i > 0) {
-          logger.warn({ primaryModel: modelChain[0], servedBy: alias, streamingFallbackAttempts }, "streaming request served by fallback")
-        }
-
-        // Flush remaining peeked state into the closure
-        const capturedToolCallIndexMap = toolCallIndexMap
-        let capturedToolCallIndexCounter = toolCallIndexCounter
-
-        // Override partToChunk to use captured state
-        activeStream.fullStream = {
-          [Symbol.asyncIterator]() {
-            return {
-              next: () => iter.next(),
-              return: (iter as any).return?.bind(iter),
-              throw: (iter as any).throw?.bind(iter),
-              _toolCallIndexMap: capturedToolCallIndexMap,
-              _toolCallIndexCounter: capturedToolCallIndexCounter,
-            } as any
-          },
+          logger.warn({ primaryModel: modelChain[0], servedBy: alias, provider: provider.id, streamingFallbackAttempts }, "streaming request served by fallback")
         }
 
         break
@@ -418,38 +554,37 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
         streamingFallbackAttempts.push({ model: alias, error })
 
         if (isLast || !isRetryableError(err)) {
-          // All models failed or error is non-retryable
+          if (timeoutHandle) clearTimeout(timeoutHandle)
           activeCompletions.dec()
-          completionRequestCounter.inc({ provider: "bedrock", model: resolveBedrockModelId(req.model), status: "error" })
+          completionRequestCounter.inc({ provider: "unknown", model: req.model, status: "error" })
 
-          db.insert(requestLog).values({
+          emitLog({
             id: logId, apiKeyId, tenantId, userId, organizationId,
-            requestedModel: req.model, resolvedModel: resolveBedrockModelId(req.model),
-            provider: "bedrock", latencyMs: Date.now() - startTime,
+            requestedModel: req.model, resolvedModel: req.model,
+            provider: "unknown", latencyMs: Date.now() - startTime,
             streaming: true, status: "error", errorMessage: error,
-          }).catch(() => {})
+          })
 
           spanError(span, err)
           span.end()
           return c.json({ error: { code: "UPSTREAM_ERROR", message: "All models in fallback chain failed", requestId } }, 502)
         }
 
-        logger.warn({ model: alias, error, nextModel: modelChain[i + 1] }, "streaming model failed before content, trying fallback")
+        logger.warn({ model: alias, error, nextModel: modelChain[i + 1] }, "streaming model failed, trying fallback")
       }
     }
 
     if (!activeStream) {
+      if (timeoutHandle) clearTimeout(timeoutHandle)
       activeCompletions.dec()
       span.end()
       return c.json({ error: { code: "UPSTREAM_ERROR", message: "No model available", requestId } }, 502)
     }
 
-    // We have a confirmed working stream — build the SSE response
-    const { bufferedChunks, fullStream, resolvedModel } = activeStream
+    const { bufferedChunks, fullStream, providerId, modelId } = activeStream
 
     const readable = new ReadableStream({
       async start(controller) {
-        // Flush buffered chunks first
         for (const chunk of bufferedChunks) {
           controller.enqueue(chunk)
         }
@@ -458,13 +593,14 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
         let outputTokens = 0
         const toolCallIndexMap = new Map<string, number>()
         let toolCallIndexCounter = 0
-
         const baseChunk = { id: completionId, object: "chat.completion.chunk", created, model: req.model }
 
         try {
-          for await (const part of fullStream) {
+          for await (const rawPart of fullStream) {
+            const part = rawPart as any
             if (part.type === "text-delta") {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ ...baseChunk, choices: [{ index: 0, delta: { content: part.textDelta }, finish_reason: null }] })}\n\n`))
+              const content = part.text ?? part.textDelta ?? ""
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ ...baseChunk, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`))
             } else if (part.type === "tool-call-streaming-start") {
               const idx = toolCallIndexCounter++
               toolCallIndexMap.set(part.toolCallId, idx)
@@ -475,8 +611,8 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
             } else if (part.type === "finish") {
               const finishReason = part.finishReason === "tool-calls" ? "tool_calls" : "stop"
               if (part.usage) {
-                inputTokens = part.usage.promptTokens ?? 0
-                outputTokens = part.usage.completionTokens ?? 0
+                inputTokens = part.usage.promptTokens ?? part.usage.inputTokens ?? 0
+                outputTokens = part.usage.completionTokens ?? part.usage.outputTokens ?? 0
               }
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ ...baseChunk, choices: [{ index: 0, delta: {}, finish_reason: finishReason }] })}\n\n`))
             }
@@ -485,38 +621,46 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
           controller.enqueue(encoder.encode("data: [DONE]\n\n"))
           controller.close()
 
+          if (timeoutHandle) clearTimeout(timeoutHandle)
+
           const latencyMs = Date.now() - startTime
-          completionRequestCounter.inc({ provider: "bedrock", model: resolvedModel, status: "success" })
-          completionTokensCounter.inc({ provider: "bedrock", model: resolvedModel, type: "input" }, inputTokens)
-          completionTokensCounter.inc({ provider: "bedrock", model: resolvedModel, type: "output" }, outputTokens)
-          completionLatency.observe({ provider: "bedrock", model: resolvedModel }, latencyMs / 1000)
+          const cost = calculateCost(providerId, modelId, inputTokens, outputTokens)
+
+          completionRequestCounter.inc({ provider: providerId, model: modelId, status: "success" })
+          completionTokensCounter.inc({ provider: providerId, model: modelId, type: "input" }, inputTokens)
+          completionTokensCounter.inc({ provider: providerId, model: modelId, type: "output" }, outputTokens)
+          completionLatency.observe({ provider: providerId, model: modelId }, latencyMs / 1000)
 
           span.setAttributes({
+            "llm.provider": providerId,
             "llm.model.served_by": servedByAlias,
-            "llm.model.resolved": resolvedModel,
+            "llm.model.resolved": modelId,
             "llm.input_tokens": inputTokens,
             "llm.output_tokens": outputTokens,
             "llm.latency_ms": latencyMs,
+            "llm.cost_usd": cost.costUsd,
           })
           span.setStatus({ code: SpanStatusCode.OK })
 
-          db.insert(requestLog).values({
+          emitLog({
             id: logId, apiKeyId, tenantId, userId, organizationId,
-            requestedModel: req.model, resolvedModel, provider: "bedrock",
+            requestedModel: req.model, resolvedModel: modelId, provider: providerId,
             inputTokens, outputTokens, latencyMs, streaming: true, status: "success",
-          }).catch((err: unknown) => logger.error({ err }, "failed to write request log"))
+            costUsd: cost.costUsd, costInr: cost.costInr,
+          })
         } catch (err) {
+          if (timeoutHandle) clearTimeout(timeoutHandle)
           spanError(span, err)
           const errChunk = JSON.stringify({ error: { code: "UPSTREAM_ERROR", message: "Stream interrupted" } })
           controller.enqueue(encoder.encode(`data: ${errChunk}\n\n`))
           controller.close()
 
-          db.insert(requestLog).values({
+          emitLog({
             id: logId, apiKeyId, tenantId, userId, organizationId,
-            requestedModel: req.model, resolvedModel, provider: "bedrock",
+            requestedModel: req.model, resolvedModel: modelId, provider: providerId,
             latencyMs: Date.now() - startTime, streaming: true, status: "error",
             errorMessage: err instanceof Error ? err.message : String(err),
-          }).catch(() => {})
+          })
         } finally {
           activeCompletions.dec()
           span.end()
@@ -530,6 +674,7 @@ completionsRouter.post("/chat/completions", async (c: Parameters<Parameters<type
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Request-Id": requestId,
+        "X-Summoned-Provider": servedByProvider,
         "X-Summoned-Served-By": servedByAlias,
       },
     })

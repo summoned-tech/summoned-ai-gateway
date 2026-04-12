@@ -1,48 +1,157 @@
 # Summoned AI Gateway
 
-Sovereign AI infrastructure layer for India. OpenAI-compatible gateway that routes LLM requests to AWS Bedrock (ap-south-1) with auth, rate limiting, and audit logging.
+Sovereign AI infrastructure for India. Multi-provider, OpenAI-compatible gateway routing to 9 LLM providers with auth, rate limiting, cost tracking, caching, guardrails, virtual keys, and audit logging.
 
 ## Architecture
 
-- **Entry** (`src/index.ts`) — Hono server on port 4000. Middleware: CORS → request-id → telemetry → auth → rate-limit.
-- **Providers** (`src/providers/bedrock.ts`) — AWS Bedrock adapter. Maps friendly model aliases → Bedrock model IDs. Demo mode collapses all tiers to Nova Lite.
-- **Routers** (`src/routers/`) — `completions.ts` (POST /v1/chat/completions, GET /v1/models), `keys.ts` (admin CRUD), `health.ts`, `metrics.ts`.
-- **Middlewares** (`src/middlewares/`) — `auth.ts` (API key → DB + Redis cache), `rate-limit.ts` (sliding window RPM), `telemetry.ts` (Prometheus + Pino).
-- **DB** (`src/db/schema.ts`) — `api_keys` table, `request_logs` (immutable audit trail).
+- **Entry** (`src/index.ts`) — Hono server. Middleware: CORS → request-id → telemetry → auth → rate-limit. Providers registered dynamically at startup based on env vars.
+- **Provider Abstraction** (`src/providers/base.ts`) — Minimal `ProviderAdapter` interface: `id`, `name`, `getModel()`, optional `getEmbeddingModel()`. No static model lists — gateway is a pure proxy.
+- **Provider Registry** (`src/providers/registry.ts`) — Central registry. Resolves `provider/model` slugs to the correct adapter. No alias maps or static catalogs.
+- **Providers** (`src/providers/`) — Bedrock, OpenAI, Anthropic, Google Gemini, Groq, Azure OpenAI, Ollama, Sarvam AI, Yotta Labs.
+- **OpenAI-Compatible Base** (`src/providers/openai-compat.ts`) — Factory for any provider that speaks the OpenAI API format.
+- **Routers** (`src/routers/`) — `completions.ts`, `embeddings.ts`, `admin.ts`, `keys.ts`, `virtual-keys.ts`, `health.ts`, `metrics.ts`.
+- **Config** (`src/lib/config.ts`) — Per-request config via `x-summoned-config` header or `config` body field. Controls retry, fallback, timeout, caching, guardrails, virtual keys, metadata.
+- **Pricing** (`src/lib/pricing.ts`) — Best-effort per-request cost in USD/INR. Decoupled from providers.
+- **Cache** (`src/lib/cache.ts`) — Redis-backed response cache. Keyed by SHA-256 of (model + messages + params). Configurable TTL.
+- **Guardrails** (`src/lib/guardrails.ts`) — Input/output validation: word deny lists, regex patterns, length limits, PII detection (email, phone, Aadhaar, SSN, credit card).
+- **Virtual Keys** (`src/lib/provider-resolve.ts`, `src/routers/virtual-keys.ts`) — Encrypted provider credentials stored in DB. SDK users reference a virtual key ID instead of raw provider API keys.
+- **Circuit Breaker** (`src/lib/circuit-breaker.ts`) — Per-provider circuit breaker (closed → open → half-open).
+- **Log Buffer** (`src/lib/log-buffer.ts`) — In-memory ring buffer (1000 entries) for real-time log streaming via WebSocket.
+- **Crypto** (`src/lib/crypto.ts`) — AES-256-GCM encryption for virtual key storage.
+- **DB** (`src/db/schema.ts`) — `api_keys`, `virtual_keys`, `request_logs` (immutable audit trail with cost + cache tracking).
 - **Telemetry** (`src/lib/telemetry/`) — OpenTelemetry tracing, Pino structured logging, Prometheus metrics.
 
-## API surface
+## Design Principles
+
+1. **Pure proxy** — No model ID validation. Upstream providers decide if the model exists.
+2. **Provider = thin wrapper** — Each provider is 5-20 lines. AI SDK handles the heavy lifting.
+3. **Pricing is a separate concern** — `pricing.ts`, keyed by `provider:model`. Missing = zero cost.
+4. **Adding a provider takes 5 minutes** — Create file, add env var, register at startup.
+
+## Providers
+
+| Provider | Type | Env Var |
+|---|---|---|
+| AWS Bedrock | AI SDK `@ai-sdk/amazon-bedrock` | `AWS_BEDROCK_API_KEY` or IAM |
+| OpenAI | AI SDK `@ai-sdk/openai` | `OPENAI_API_KEY` |
+| Anthropic | AI SDK `@ai-sdk/anthropic` | `ANTHROPIC_API_KEY` |
+| Google Gemini | AI SDK `@ai-sdk/google` | `GOOGLE_API_KEY` |
+| Groq | OpenAI-compatible | `GROQ_API_KEY` |
+| Azure OpenAI | OpenAI-compatible | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` |
+| Ollama | OpenAI-compatible (local) | `OLLAMA_BASE_URL` |
+| Sarvam AI | OpenAI-compatible (India) | `SARVAM_API_KEY` |
+| Yotta Labs | OpenAI-compatible (India) | `YOTTA_API_KEY` |
+
+## Model Format
+
+Always use `provider/model-id`:
+- `openai/gpt-4o`, `anthropic/claude-sonnet-4-20250514`, `groq/llama-3.3-70b-versatile`
+- `bedrock/anthropic.claude-sonnet-4-20250514-v1:0`, `google/gemini-2.0-flash`
+
+## API Surface
 
 ```
-POST /v1/chat/completions   # OpenAI-compatible, streaming + non-streaming
-GET  /v1/models             # List available model aliases
-POST /v1/keys               # Admin: create API key (x-admin-key required)
-GET  /v1/keys?tenantId=...  # Admin: list keys
-DELETE /v1/keys/:id         # Admin: revoke key
-GET  /health                # Liveness
-GET  /health/ready          # Readiness (checks Postgres + Redis)
-GET  /metrics               # Prometheus metrics
+POST /v1/chat/completions        # Multi-provider, streaming + non-streaming
+POST /v1/embeddings               # Multi-provider embeddings
+GET  /v1/models                   # List registered providers
+POST /v1/keys                     # Admin: create API key
+GET  /v1/keys?tenantId=...        # Admin: list keys
+DELETE /v1/keys/:id               # Admin: revoke key
+POST /admin/virtual-keys          # Create virtual key (encrypted provider creds)
+GET  /admin/virtual-keys?tenantId # List virtual keys
+DELETE /admin/virtual-keys/:id    # Revoke virtual key
+GET  /admin/logs                  # Recent logs (buffer or DB)
+GET  /admin/stats                 # Aggregate stats (24h/7d/30d)
+GET  /admin/providers             # Provider health + status
+GET  /health                      # Liveness
+GET  /health/ready                # Readiness
+GET  /metrics                     # Prometheus metrics
+WS   /ws/logs                     # Real-time log streaming
 ```
 
-## Model aliases
+## Config (per-request)
 
-| Alias | Resolves to (Bedrock) |
-|---|---|
-| `claude-sonnet-4` | `anthropic.claude-sonnet-4-20250514-v1:0` |
-| `nova-pro` | `amazon.nova-pro-v1:0` |
-| `nova-lite` | `amazon.nova-lite-v1:0` |
-| `nova-micro` | `amazon.nova-micro-v1:0` |
+Pass via `x-summoned-config` header (base64 JSON or raw JSON) or `config` field in request body:
 
-Set `BEDROCK_DEMO_MODE=true` to route all aliases to `nova-lite` for cost saving.
+```json
+{
+  "retry": { "attempts": 3, "backoff": "exponential" },
+  "timeout": 30000,
+  "fallback": ["groq/llama-3.3-70b-versatile"],
+  "cache": true,
+  "cacheTtl": 3600,
+  "virtualKey": "vk_abc123",
+  "traceId": "my-trace-id",
+  "metadata": { "env": "production", "feature": "chatbot" },
+  "guardrails": {
+    "input": [
+      { "type": "pii", "deny": true },
+      { "type": "contains", "params": { "operator": "none", "words": ["password"] }, "deny": true }
+    ],
+    "output": [
+      { "type": "contains", "params": { "operator": "none", "words": ["confidential"] }, "deny": true }
+    ]
+  }
+}
+```
 
-## Conventions
+## Response Headers
 
-- API keys are hashed with SHA-256; raw key returned only at creation.
-- Key cache: Redis with 5-minute TTL to avoid per-request DB reads.
-- Rate limiting: sliding window per API key (default 60 RPM).
-- All LLM requests are logged to `request_logs` table (async, non-blocking).
-- Use `logger` from `@/lib/telemetry` — no `console.log`.
-- Imports use `@/` alias.
+Every response includes:
+- `X-Summoned-Provider` — which provider served the request
+- `X-Summoned-Served-By` — model alias used
+- `X-Summoned-Cost-USD` — estimated cost
+- `X-Summoned-Latency-Ms` — total latency
+- `X-Summoned-Trace-Id` — trace ID for correlation
+- `X-Summoned-Cache` — `HIT` or `MISS`
+- `X-RateLimit-Limit` / `X-RateLimit-Remaining` — rate limit info
+
+## SDKs
+
+### TypeScript (`@summoned/ai` — `summoned-sdk-ts/`)
+
+```typescript
+import { Summoned } from "@summoned/ai"
+
+const client = new Summoned({ apiKey: "sk-smnd-..." })
+
+const res = await client.chat.completions.create({
+  model: "openai/gpt-4o",
+  messages: [{ role: "user", content: "Hello" }],
+  config: { cache: true, fallback: ["anthropic/claude-sonnet-4-20250514"] },
+})
+
+// Streaming
+for await (const chunk of await client.chat.completions.create({
+  model: "openai/gpt-4o",
+  messages: [{ role: "user", content: "Hello" }],
+  stream: true,
+})) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? "")
+}
+```
+
+### Python (`summoned-ai` — `summoned-sdk-python/`)
+
+```python
+from summoned_ai import Summoned
+
+client = Summoned(api_key="sk-smnd-...")
+
+response = client.chat.completions.create(
+    model="openai/gpt-4o",
+    messages=[{"role": "user", "content": "Hello"}],
+    config={"cache": True, "fallback": ["anthropic/claude-sonnet-4-20250514"]},
+)
+
+# Streaming
+for chunk in client.chat.completions.create(
+    model="openai/gpt-4o",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=True,
+):
+    print(chunk["choices"][0]["delta"].get("content", ""), end="")
+```
 
 ## Running
 
@@ -51,8 +160,10 @@ bun run dev          # HTTP server on :4000
 bun run db:migrate   # Apply migrations
 ```
 
-## Adding a new provider
+## Adding a New Provider
 
-1. Add a new file in `src/providers/`.
-2. Extend the model map in `src/providers/bedrock.ts` or add routing logic in `src/routers/completions.ts`.
-3. Add provider env vars to `src/lib/env.ts`.
+1. Create `src/providers/{name}.ts` — use `createOpenAICompatProvider()` or implement `ProviderAdapter`.
+2. Add env var to `src/lib/env.ts`.
+3. Add registration block in `src/index.ts` `registerProviders()`.
+4. (Optional) Add pricing entries to `src/lib/pricing.ts`.
+5. (Optional) Add ephemeral provider case to `src/lib/provider-resolve.ts`.

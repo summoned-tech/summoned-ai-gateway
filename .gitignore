@@ -3,3 +3,21 @@ dist/
 .env
 *.log
 .DS_Store
+
+# Console build output (rebuilt from console/ source)
+public/console/
+
+# Drizzle generated metadata (migrations SQL is committed)
+drizzle/meta/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+
+# Build artifacts
+*.tsbuildinfo

@@ -17,6 +17,7 @@ export const keysRouter = new Hono()
 
 function requireAdmin() {
   return async (c: any, next: any) => {
+    if (c.get("consoleAuth")) return next()
     const key = c.req.header("x-admin-key")
     if (key !== env.ADMIN_API_KEY) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid admin key" } }, 401)

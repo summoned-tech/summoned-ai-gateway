@@ -1,16 +1,16 @@
-import type { LanguageModel } from "ai"
+import type { LanguageModel, EmbeddingModel } from "ai"
 import { BedrockClient, ListFoundationModelsCommand, type FoundationModelSummary } from "@aws-sdk/client-bedrock"
+import type { ProviderAdapter } from "./base"
 import { env } from "@/lib/env"
 import { logger } from "@/lib/telemetry"
 
 // ---------------------------------------------------------------------------
-// Available models — fetched from Bedrock at startup, cached in memory.
-// No static list to maintain. Whatever AWS has in ap-south-1, we serve.
+// Model cache — fetched lazily from Bedrock API (not a static catalog)
 // ---------------------------------------------------------------------------
 
 let _availableModels: FoundationModelSummary[] = []
 let _lastFetched = 0
-const CACHE_TTL_MS = 60 * 60 * 1000 // re-fetch every hour in case AWS adds new models
+const CACHE_TTL_MS = 60 * 60 * 1000
 
 async function fetchAvailableModels(): Promise<FoundationModelSummary[]> {
   const opts: ConstructorParameters<typeof BedrockClient>[0] = { region: env.AWS_REGION }
@@ -23,10 +23,9 @@ async function fetchAvailableModels(): Promise<FoundationModelSummary[]> {
   }
 
   const client = new BedrockClient(opts)
-
   const response = await client.send(new ListFoundationModelsCommand({
-    byOutputModality: "TEXT",          // only text-output models — skip image/embedding
-    byInferenceType: "ON_DEMAND",      // only serverless (no provisioned throughput needed)
+    byOutputModality: "TEXT",
+    byInferenceType: "ON_DEMAND",
   }))
 
   return response.modelSummaries ?? []
@@ -41,7 +40,6 @@ export async function refreshModelCache(): Promise<void> {
     _lastFetched = now
     logger.info({ count: _availableModels.length, region: env.AWS_REGION }, "bedrock model list refreshed")
   } catch (err) {
-    // On refresh failure, keep using stale cache — don't crash
     if (_availableModels.length > 0) {
       logger.warn({ err }, "failed to refresh bedrock model list, using stale cache")
     } else {
@@ -51,28 +49,37 @@ export async function refreshModelCache(): Promise<void> {
   }
 }
 
+/** Returns models fetched from the Bedrock API (dynamic, not a static list) */
+export function listAvailableModels() {
+  return _availableModels.map((m) => ({
+    id: m.modelId ?? "",
+    object: "model" as const,
+    created: 1_700_000_000,
+    owned_by: m.providerName?.toLowerCase() ?? "unknown",
+  }))
+}
+
 // ---------------------------------------------------------------------------
-// Demo mode
+// Demo mode — pins all requests to a fixed model for testing
 // ---------------------------------------------------------------------------
 
 const DEMO_MODEL_ID = "amazon.nova-pro-v1:0"
 
-export function resolveBedrockModelId(modelId: string): string {
+function resolveModelId(modelId: string): string {
   if (env.BEDROCK_DEMO_MODE) return DEMO_MODEL_ID
   return modelId
 }
 
 // ---------------------------------------------------------------------------
-// Provider factory — lazy init, singleton
+// AI SDK Bedrock provider — lazy init singleton
 // ---------------------------------------------------------------------------
 
 let _provider: Awaited<ReturnType<typeof import("@ai-sdk/amazon-bedrock").createAmazonBedrock>> | null = null
 
-export async function getBedrockProvider() {
+async function getAiSdkProvider() {
   if (_provider) return _provider
 
   const { createAmazonBedrock } = await import("@ai-sdk/amazon-bedrock")
-
   const opts: Record<string, unknown> = { region: env.AWS_REGION }
 
   if (env.AWS_BEDROCK_API_KEY) {
@@ -82,9 +89,7 @@ export async function getBedrockProvider() {
     opts.secretAccessKey = env.AWS_SECRET_ACCESS_KEY
   }
 
-  // Zod v4 + AI SDK's asSchema() produces broken JSON schemas for tools
-  // (missing type/properties). We intercept the fetch and replace tool schemas
-  // with the original clean JSON schemas cached by openAiToolsToTools().
+  // Zod v4 + AI SDK produces broken JSON schemas for tools — intercept and fix
   opts.fetch = async (url: string | URL | Request, init?: RequestInit) => {
     let bodyStr: string | null = null
     if (typeof init?.body === "string") bodyStr = init.body
@@ -93,7 +98,6 @@ export async function getBedrockProvider() {
       try {
         const body = JSON.parse(bodyStr)
         if (body.toolConfig?.tools) {
-          const { _toolSchemaCache } = await import("@/routers/completions")
           for (const tool of body.toolConfig.tools) {
             if (tool.toolSpec) {
               const cached = _toolSchemaCache.get(tool.toolSpec.name)
@@ -120,28 +124,35 @@ export async function getBedrockProvider() {
   return _provider
 }
 
-export async function getBedrockModel(modelAlias: string): Promise<LanguageModel> {
-  const provider = await getBedrockProvider()
-  const modelId = resolveBedrockModelId(modelAlias)
-  return provider(modelId)
-}
+export const _toolSchemaCache = new Map<string, Record<string, unknown>>()
 
 // ---------------------------------------------------------------------------
-// /v1/models — returns live list from Bedrock, OpenAI-compatible format
+// ProviderAdapter implementation
 // ---------------------------------------------------------------------------
 
-export function listAvailableModels() {
-  return _availableModels.map((m) => ({
-    id: m.modelId ?? "",
-    object: "model" as const,
-    created: 1_700_000_000,
-    owned_by: m.providerName?.toLowerCase() ?? "unknown",
-    summoned: {
-      model_name: m.modelName,
-      provider: m.providerName,
-      input_modalities: m.inputModalities,
-      output_modalities: m.outputModalities,
-      streaming: m.responseStreamingSupported ?? false,
+let _bedrockAdapter: ProviderAdapter | null = null
+
+export async function createBedrockProvider(): Promise<ProviderAdapter> {
+  if (_bedrockAdapter) return _bedrockAdapter
+
+  const aiProvider = await getAiSdkProvider()
+
+  _bedrockAdapter = {
+    id: "bedrock",
+    name: "AWS Bedrock",
+
+    getModel(modelId: string): LanguageModel {
+      return aiProvider(resolveModelId(modelId))
     },
-  }))
+
+    getEmbeddingModel(modelId: string): EmbeddingModel {
+      return aiProvider.textEmbeddingModel(modelId)
+    },
+  }
+
+  return _bedrockAdapter
 }
+
+// Backward compat
+export async function getBedrockProvider() { return getAiSdkProvider() }
+export function resolveBedrockModelId(alias: string): string { return resolveModelId(alias) }

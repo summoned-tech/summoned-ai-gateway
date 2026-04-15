@@ -21,3 +21,7 @@ Thumbs.db
 
 # Build artifacts
 *.tsbuildinfo
+
+# Demo recording tooling — not part of the project
+scripts/
+assets/screenshots/

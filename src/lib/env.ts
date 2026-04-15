@@ -7,6 +7,11 @@ const schema = z.object({
   // Admin — used to create/rotate API keys via POST /v1/keys
   ADMIN_API_KEY: z.string().min(32),
 
+  // Encryption key for virtual keys (AES-256-GCM via HKDF).
+  // Generate: openssl rand -hex 32
+  // If unset, falls back to ADMIN_API_KEY (not recommended for production).
+  VIRTUAL_KEY_SECRET: z.string().default(""),
+
   // ---------------------------------------------------------------------------
   // Provider credentials — set the keys for providers you want to enable.
   // Only providers with valid credentials are registered at startup.
@@ -48,8 +53,23 @@ const schema = z.object({
   // Infrastructure
   // ---------------------------------------------------------------------------
 
-  // PostgreSQL — audit logs, API keys
-  POSTGRES_URL: z.string().url(),
+  // ---------------------------------------------------------------------------
+  // Auth & public mode
+  // ---------------------------------------------------------------------------
+
+  // Set to "false" to allow unauthenticated requests (BYOK public deployments).
+  // In that mode callers must supply their own provider key via x-provider-key header.
+  GATEWAY_REQUIRE_AUTH: z.string().default("true").transform((v) => v !== "false"),
+
+  // RPM cap for public/BYOK callers (no sk-smnd- key). Per source-IP.
+  PUBLIC_RPM_LIMIT: z.coerce.number().default(60),
+
+  // ---------------------------------------------------------------------------
+  // Infrastructure
+  // ---------------------------------------------------------------------------
+
+  // PostgreSQL — audit logs, API keys (optional when GATEWAY_REQUIRE_AUTH=false)
+  POSTGRES_URL: z.string().default(""),
 
   // Redis — rate limiting, key cache
   REDIS_URL: z.string().default("redis://localhost:6379"),

@@ -14,7 +14,9 @@ import { pushLog } from "@/lib/log-buffer"
 import { getCacheKey, getCachedResponse, setCachedResponse } from "@/lib/cache"
 import { runGuardrails } from "@/lib/guardrails"
 import { resolveVirtualKey, createEphemeralProvider } from "@/lib/provider-resolve"
-import { recordSuccess, recordFailure } from "@/lib/circuit-breaker"
+import { isProviderAvailable, recordSuccess, recordFailure } from "@/lib/circuit-breaker"
+import { incrementDailyTokens } from "@/lib/budget"
+import { sortByCost, sortByLatency, recordProviderLatency } from "@/lib/routing"
 import type { AuthContext } from "@/middlewares/auth"
 
 const tracer = getTracer()
@@ -149,6 +151,29 @@ function openAiToolsToTools(tools: z.infer<typeof toolSchema>[]): Record<string,
 export { _toolSchemaCache }
 
 // ---------------------------------------------------------------------------
+// Model resolution — handles both managed registry and BYOK ephemeral providers
+// ---------------------------------------------------------------------------
+
+async function resolveModelForAlias(alias: string, byokKey: string | null) {
+  if (!byokKey) {
+    return registry.getModel(alias)
+  }
+
+  // BYOK: parse "provider/model-id" — default to "openai" if no prefix given
+  const slashIdx = alias.indexOf("/")
+  const providerId = slashIdx !== -1 ? alias.slice(0, slashIdx) : "openai"
+  const modelId = slashIdx !== -1 ? alias.slice(slashIdx + 1) : alias
+
+  const adapter = await createEphemeralProvider(providerId, byokKey)
+  if (!adapter) {
+    throw new Error(`Unknown provider "${providerId}". Use "provider/model" format, e.g. "openai/gpt-4o".`)
+  }
+
+  const model = adapter.getModel(modelId)
+  return { model, provider: adapter, modelId }
+}
+
+// ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
 
@@ -223,10 +248,38 @@ completionsRouter.post("/chat/completions", async (c: any) => {
   const config = parseConfig(c.req.header("x-summoned-config"), req.config)
   const traceId = config?.traceId ?? c.req.header("x-trace-id") ?? requestId
 
-  // Build the model chain: primary + config fallbacks + body fallbacks
+  // BYOK: caller supplies their own provider API key via x-provider-key header
+  const byokKey = c.req.header("x-provider-key") ?? null
+
+  // Build the model chain: primary + config fallbacks + body fallbacks,
+  // then remove providers whose circuit breaker is currently OPEN (unless BYOK).
   const configFallbacks = config?.fallback ?? []
   const bodyFallbacks = req.fallback_models ?? []
-  const modelChain = [req.model, ...configFallbacks, ...bodyFallbacks]
+  const rawModelChain = [req.model, ...configFallbacks, ...bodyFallbacks]
+
+  // Filter by circuit breaker (BYOK callers skip this — their key, their risk)
+  const availableChain = byokKey
+    ? rawModelChain
+    : rawModelChain.filter((alias) => {
+        const providerId = alias.includes("/") ? alias.split("/")[0] : null
+        if (!providerId) return true
+        const available = isProviderAvailable(providerId)
+        if (!available) {
+          logger.warn({ alias, providerId }, "circuit breaker OPEN — skipping provider in chain")
+        }
+        return available
+      })
+
+  // Apply routing strategy to determine attempt order
+  const routingStrategy = config?.routing ?? "default"
+  let modelChain: string[]
+  if (routingStrategy === "cost") {
+    modelChain = sortByCost(availableChain)
+  } else if (routingStrategy === "latency") {
+    modelChain = await sortByLatency(availableChain)
+  } else {
+    modelChain = availableChain // "default" — caller's explicit order wins
+  }
 
   // --- Input guardrails ---
   if (config?.guardrails?.input?.length) {
@@ -311,7 +364,7 @@ completionsRouter.post("/chat/completions", async (c: any) => {
         const { result, modelAlias, attemptIndex, totalRetries, fallbackAttempts } = await tryWithFallback(
           modelChain,
           async (alias) => {
-            const { model, provider, modelId } = registry.getModel(alias)
+            const { model, provider, modelId } = await resolveModelForAlias(alias, byokKey)
             const r = await generateText({
               ...baseOptions,
               model,
@@ -336,6 +389,10 @@ completionsRouter.post("/chat/completions", async (c: any) => {
         completionTokensCounter.inc({ provider: provider.id, model: modelId, type: "output" }, outputTokens)
         completionLatency.observe({ provider: provider.id, model: modelId }, latencyMs / 1000)
 
+        // Async fire-and-forget: token budget + latency EMA (never block response)
+        incrementDailyTokens(apiKeyId, inputTokens + outputTokens)
+        recordProviderLatency(provider.id, latencyMs)
+
         span.setAttributes({
           "llm.provider": provider.id,
           "llm.model.served_by": modelAlias,
@@ -346,6 +403,7 @@ completionsRouter.post("/chat/completions", async (c: any) => {
           "llm.output_tokens": outputTokens,
           "llm.latency_ms": latencyMs,
           "llm.cost_usd": cost.costUsd,
+          "llm.routing_strategy": routingStrategy,
         })
         span.setStatus({ code: SpanStatusCode.OK })
 
@@ -396,6 +454,7 @@ completionsRouter.post("/chat/completions", async (c: any) => {
             retries: totalRetries,
             cost: cost,
             latency_ms: latencyMs,
+            routing_strategy: routingStrategy,
             cache: false,
           },
         }
@@ -476,7 +535,7 @@ completionsRouter.post("/chat/completions", async (c: any) => {
       const isLast = i === modelChain.length - 1
 
       try {
-        const { model, provider, modelId } = registry.getModel(alias)
+        const { model, provider, modelId } = await resolveModelForAlias(alias, byokKey)
         const stream = streamText({
           ...baseOptions,
           model,
@@ -631,6 +690,10 @@ completionsRouter.post("/chat/completions", async (c: any) => {
           completionTokensCounter.inc({ provider: providerId, model: modelId, type: "output" }, outputTokens)
           completionLatency.observe({ provider: providerId, model: modelId }, latencyMs / 1000)
 
+          // Async fire-and-forget: token budget + latency EMA
+          incrementDailyTokens(apiKeyId, inputTokens + outputTokens)
+          recordProviderLatency(providerId, latencyMs)
+
           span.setAttributes({
             "llm.provider": providerId,
             "llm.model.served_by": servedByAlias,
@@ -639,6 +702,7 @@ completionsRouter.post("/chat/completions", async (c: any) => {
             "llm.output_tokens": outputTokens,
             "llm.latency_ms": latencyMs,
             "llm.cost_usd": cost.costUsd,
+            "llm.routing_strategy": routingStrategy,
           })
           span.setStatus({ code: SpanStatusCode.OK })
 

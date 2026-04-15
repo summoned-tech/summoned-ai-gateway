@@ -1,8 +1,10 @@
 import { useState, useRef } from "react"
 
 interface Message { role: "user" | "assistant"; content: string }
+type AuthMode = "managed" | "byok"
 
 export default function Playground() {
+  const [authMode, setAuthMode] = useState<AuthMode>("managed")
   const [apiKey, setApiKey] = useState("")
   const [model, setModel] = useState("openai/gpt-4o-mini")
   const [messages, setMessages] = useState<Message[]>([])
@@ -18,16 +20,26 @@ export default function Playground() {
 
   const send = async () => {
     if (!input.trim() || loading) return
-    if (!apiKey.trim()) { setError("Enter a Summoned API key (sk-smnd-...) to test"); return }
+    if (!apiKey.trim()) {
+      setError(authMode === "managed" ? "Enter a Summoned API key (sk-smnd-...)" : "Enter your provider API key (e.g. sk-ant-..., sk-...)")
+      return
+    }
 
     const userMsg: Message = { role: "user", content: input.trim() }
     const newMessages = [...messages, userMsg]
     setMessages(newMessages); setInput(""); setError(""); setLoading(true)
 
+    const headers: Record<string, string> = { "Content-Type": "application/json" }
+    if (authMode === "managed") {
+      headers["Authorization"] = `Bearer ${apiKey}`
+    } else {
+      headers["x-provider-key"] = apiKey
+    }
+
     try {
       const res = await fetch(`${gatewayUrl}/v1/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+        headers,
         body: JSON.stringify({ model, messages: newMessages.map((m) => ({ role: m.role, content: m.content })) }),
       })
 
@@ -62,10 +74,40 @@ export default function Playground() {
           </div>
           <button onClick={() => { setMessages([]); setResponseInfo({}); setError("") }} className="px-3 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-md transition-colors font-medium">Clear</button>
         </div>
+
+        {/* Auth mode toggle */}
+        <div className="flex gap-1 mb-3 bg-gray-100 rounded-lg p-1 w-fit">
+          <button
+            onClick={() => { setAuthMode("managed"); setApiKey("") }}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${authMode === "managed" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+          >
+            Managed Key
+          </button>
+          <button
+            onClick={() => { setAuthMode("byok"); setApiKey("") }}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${authMode === "byok" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+          >
+            BYOK (Your Provider Key)
+          </button>
+        </div>
+
         <div className="flex gap-3">
           <div className="flex-1">
-            <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1">API Key</label>
-            <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-smnd-..." className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400" />
+            <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1">
+              {authMode === "managed" ? "Summoned API Key" : "Provider API Key"}
+            </label>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={authMode === "managed" ? "sk-smnd-..." : "sk-ant-... / sk-... / AIza..."}
+              className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400"
+            />
+            {authMode === "byok" && (
+              <p className="text-[11px] text-gray-400 mt-1">
+                Key sent as <code className="bg-gray-100 px-1 rounded">x-provider-key</code> header — never stored
+              </p>
+            )}
           </div>
           <div className="w-64">
             <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1">Model</label>

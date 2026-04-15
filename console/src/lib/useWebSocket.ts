@@ -3,19 +3,32 @@ import type { LogEntry } from "./api"
 
 const MAX_LOGS = 500
 
+// Console is served from the gateway itself — use localStorage to persist the
+// admin key across page refreshes so users don't have to re-enter it.
+function getAdminKey(): string {
+  return localStorage.getItem("summoned_admin_key") ?? ""
+}
+
+export function setAdminKey(key: string): void {
+  localStorage.setItem("summoned_admin_key", key)
+}
+
 export function useLogStream() {
   const [logs, setLogs] = useState<LogEntry[]>([] as LogEntry[])
   const [connected, setConnected] = useState(false)
+  const [authError, setAuthError] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:"
-    const host = import.meta.env.DEV ? "localhost:4000" : window.location.host
-    const ws = new WebSocket(`${protocol}//${host}/ws/logs`)
+    const host = import.meta.env.DEV ? "localhost:4200" : window.location.host
+    const key = getAdminKey()
+    // Pass key as query param — browser WS API cannot set custom headers
+    const ws = new WebSocket(`${protocol}//${host}/ws/logs${key ? `?key=${encodeURIComponent(key)}` : ""}`)
     wsRef.current = ws
 
-    ws.onopen = () => setConnected(true)
+    ws.onopen = () => { setConnected(true); setAuthError(false) }
 
     ws.onmessage = (ev) => {
       try {
@@ -28,8 +41,13 @@ export function useLogStream() {
       } catch { /* ignore */ }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       setConnected(false)
+      // Code 1008 = policy violation (server rejected auth) — don't reconnect
+      if (ev.code === 1008 || ev.reason?.includes("UNAUTHORIZED")) {
+        setAuthError(true)
+        return
+      }
       reconnectTimer.current = setTimeout(connect, 3000)
     }
 
@@ -46,5 +64,5 @@ export function useLogStream() {
 
   const clear = useCallback(() => setLogs([]), [])
 
-  return { logs, connected, clear }
+  return { logs, connected, authError, clear }
 }

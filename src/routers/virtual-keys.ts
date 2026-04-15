@@ -4,7 +4,7 @@ import { nanoid } from "nanoid"
 import { z } from "zod"
 
 import { db, virtualKey } from "@/lib/db"
-import { encrypt } from "@/lib/crypto"
+import { encrypt, timingSafeEqual } from "@/lib/crypto"
 import { env } from "@/lib/env"
 import { logger } from "@/lib/telemetry"
 
@@ -13,8 +13,8 @@ export const virtualKeysRouter = new Hono()
 function requireAdmin() {
   return async (c: any, next: any) => {
     if (c.get("consoleAuth")) return next()
-    const key = c.req.header("x-admin-key")
-    if (key !== env.ADMIN_API_KEY) {
+    const key = c.req.header("x-admin-key") ?? ""
+    if (!timingSafeEqual(key, env.ADMIN_API_KEY)) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid admin key" } }, 401)
     }
     return next()

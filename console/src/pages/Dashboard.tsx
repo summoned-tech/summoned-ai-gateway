@@ -78,7 +78,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
         <StatCard label="Total Requests" value={stats.requests.total.toLocaleString()} />
         <StatCard label="Success Rate" value={`${successRate}%`} accent={Number(successRate) > 95 ? "text-emerald-600" : "text-amber-600"} />
         <StatCard label="Avg Latency" value={`${stats.latency.avg}ms`} sub={`p95: ${stats.latency.p95}ms · p99: ${stats.latency.p99}ms`} />
@@ -88,7 +88,12 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <StatCard label="Active API Keys" value={stats.activeApiKeys} />
         <StatCard label="Providers" value={stats.providers.length} sub={stats.providers.join(", ")} />
-        <StatCard label="Errors" value={stats.requests.errors} accent={stats.requests.errors > 0 ? "text-red-600" : "text-gray-400"} />
+        <StatCard
+          label="Total Cost"
+          value={stats.costUsd !== undefined ? `$${stats.costUsd.toFixed(4)}` : "—"}
+          sub={stats.costUsd ? `≈ ₹${(stats.costUsd * 85).toFixed(2)}` : undefined}
+          accent="text-gray-900"
+        />
         <StatCard label="Error Rate" value={`${stats.requests.errorRate}%`} accent={stats.requests.errorRate > 5 ? "text-red-600" : "text-emerald-600"} />
       </div>
 

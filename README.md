@@ -1,73 +1,95 @@
 <p align="center">
   <h1 align="center">Summoned AI Gateway</h1>
   <p align="center">
-    <strong>Open-source AI gateway that unifies 10+ LLM providers behind a single OpenAI-compatible API.</strong>
+    <strong>Open-source AI gateway — 9 LLM providers behind a single OpenAI-compatible API.</strong>
   </p>
   <p align="center">
     <a href="#quick-start">Quick Start</a> &middot;
-    <a href="#supported-providers">Providers</a> &middot;
     <a href="#console">Console</a> &middot;
-    <a href="#sdks">SDKs</a> &middot;
+    <a href="#supported-providers">Providers</a> &middot;
+    <a href="#features">Features</a> &middot;
+    <a href="#how-to-use">How to Use</a> &middot;
     <a href="#contributing">Contributing</a>
+  </p>
+  <p align="center">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" />
+    <img src="https://img.shields.io/badge/bun-%3E%3D1.2-orange.svg" alt="Bun 1.2+" />
+    <img src="https://img.shields.io/badge/OpenAI--compatible-yes-green.svg" alt="OpenAI Compatible" />
   </p>
 </p>
 
 ---
 
-Drop-in replacement for the OpenAI API. Switch between OpenAI, Anthropic, Gemini, Groq, Bedrock, and more — with automatic retries, fallbacks, caching, guardrails, and cost tracking — **without changing a single line of your application code.**
+Self-host your own AI gateway. Bring the provider API keys you already have — Summoned sits in front and adds intelligent routing, automatic failover, response caching, rate limiting, guardrails, and a built-in dashboard. **No code changes needed in your app.**
 
 ```
-Your App  ──>  Summoned Gateway  ──>  OpenAI / Anthropic / Gemini / Groq / Azure / Bedrock / Ollama ...
-                     |
-                     |── Automatic retries & fallbacks
-                     |── Response caching (Redis)
-                     |── Input/output guardrails (PII, regex, blocklists)
-                     |── Per-tenant API keys & rate limiting
-                     |── Cost tracking (USD + INR)
-                     |── Circuit breaker per provider
-                     |── Built-in console with live logs
-                     \── Real-time WebSocket log streaming
+Your App  ──►  Summoned Gateway  ──►  OpenAI / Anthropic / Gemini / Groq / Bedrock / Ollama ...
+                      │
+                      ├── Intelligent routing (cost / latency)
+                      ├── Automatic retries & fallbacks
+                      ├── Circuit breaker per provider
+                      ├── Response caching (Redis)
+                      ├── Input/output guardrails (PII, regex, blocklists)
+                      ├── Per-key rate limiting & daily token budgets
+                      ├── Cost tracking per request (USD + INR)
+                      └── Built-in console — logs, keys, playground
 ```
 
-### Why Summoned?
+---
 
-- **Zero lock-in** — Uses the standard OpenAI API format. Your existing code works as-is.
-- **Pure proxy** — No static model catalog. Any model the upstream provider supports works instantly. Zero maintenance when new models launch.
-- **Built-in console** — Dashboard, live logs, key management, and a playground — all served from the gateway itself. No extra setup.
-- **5-minute setup** — Clone, add one API key, `docker compose up`. Done.
-- **Add a provider in 10 lines** — Each provider is a thin wrapper. See [Adding a New Provider](#adding-a-new-provider).
+## Console
+
+The gateway ships with a **built-in web console** — no separate app, no extra setup. It's served directly from the gateway at `/console`.
+
+![Console demo](./assets/console-demo.gif)
+
+### What's inside the console
+
+| Page | What it does |
+|---|---|
+| **Dashboard** | Request volume, success rate, latency percentiles (p50/p95/p99), top models, cost over time |
+| **Live Logs** | Real-time request stream via WebSocket — search, filter by status or provider, click any row to expand full details |
+| **API Keys** | Create, list, and revoke `sk-smnd-...` keys without touching the CLI |
+| **Virtual Keys** | Store provider API keys encrypted on the gateway — callers reference a virtual key ID, never the raw credential |
+| **Providers** | Health status and circuit breaker state (CLOSED / OPEN / HALF_OPEN) for every registered provider |
+| **Playground** | Send test completions to any model directly from the browser — see provider, latency, cost, and cache status in real-time |
+
+> **Console auth:** Live Logs requires your `ADMIN_API_KEY` (enter it once — stored in `localStorage`). All other pages are accessible while served from the same origin.
 
 ---
 
 ## Quick Start
 
-### Option 1: Docker Compose (recommended)
+You need: [Bun](https://bun.sh) v1.2+, Docker, and at least one provider API key.
+
+### Option 1 — Docker Compose (recommended)
 
 ```bash
 git clone https://github.com/summoned-tech/summoned-ai-gateway.git
 cd summoned-ai-gateway
 
 cp .env.example .env
-# Edit .env — set ADMIN_API_KEY and at least one provider key (e.g. OPENAI_API_KEY)
+# Edit .env — minimum required:
+#   ADMIN_API_KEY=<openssl rand -hex 32>
+#   VIRTUAL_KEY_SECRET=<openssl rand -hex 32>
+#   OPENAI_API_KEY=sk-...   (or any other provider key)
 
 docker compose up -d
 ```
 
-> **Gateway** → `http://localhost:4000`
-> **Console** → `http://localhost:4000/console`
+**Gateway** → `http://localhost:4200`
+**Console** → `http://localhost:4200/console`
 
-### Option 2: Local with Make
+### Option 2 — Local with Make
 
 ```bash
 git clone https://github.com/summoned-tech/summoned-ai-gateway.git
 cd summoned-ai-gateway
-make setup    # installs deps, starts Postgres + Redis, runs migrations, builds console
-make dev      # starts the gateway with hot reload
+make setup   # deps + Postgres + Redis + migrations + console build
+make dev     # gateway with hot reload
 ```
 
-### Option 3: Manual Setup
-
-**Prerequisites:** [Bun](https://bun.sh) v1.2+, PostgreSQL, Redis
+### Option 3 — Manual
 
 ```bash
 git clone https://github.com/summoned-tech/summoned-ai-gateway.git
@@ -75,33 +97,38 @@ cd summoned-ai-gateway
 bun install
 cp .env.example .env   # edit with your keys
 
-# Start Postgres and Redis
-docker run -d --name postgres -p 5432:5432 \
+docker run -d --name pg -p 5432:5432 \
   -e POSTGRES_USER=summoned -e POSTGRES_PASSWORD=summoned \
   -e POSTGRES_DB=summoned_gateway postgres:16-alpine
 docker run -d --name redis -p 6379:6379 redis:7-alpine
 
-# Migrate and start
 bun run db:generate && bun run db:migrate
 bun run dev
 ```
 
-### Your First Request
+### First request
 
-**1. Create an API key:**
+**Option A — pass your provider key directly (no gateway key needed):**
 
 ```bash
-curl -X POST http://localhost:4000/v1/keys \
-  -H "x-admin-key: YOUR_ADMIN_API_KEY" \
+curl http://localhost:4200/v1/chat/completions \
+  -H "x-provider-key: sk-YOUR_OPENAI_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-first-key", "tenantId": "default"}'
+  -d '{"model": "openai/gpt-4o-mini", "messages": [{"role":"user","content":"Hello!"}]}'
 ```
 
-**2. Use it:**
+**Option B — use a gateway-managed key (recommended for teams):**
 
 ```bash
-curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer sk-smnd-YOUR_KEY_HERE" \
+# 1. Create a gateway key
+curl -X POST http://localhost:4200/v1/keys \
+  -H "x-admin-key: YOUR_ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-app", "tenantId": "team-a", "rateLimitRpm": 100}'
+
+# 2. Use it — same as any OpenAI call
+curl http://localhost:4200/v1/chat/completions \
+  -H "Authorization: Bearer sk-smnd-YOUR_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "openai/gpt-4o-mini",
@@ -109,115 +136,92 @@ curl http://localhost:4000/v1/chat/completions \
   }'
 ```
 
-Or skip the CLI entirely — open `http://localhost:4000/console`, go to **API Keys**, click **Create Key**, then test it in the **Playground**.
+Or skip the CLI — open the console, go to **API Keys → Create Key**, then test in **Playground**.
 
 ---
 
 ## Supported Providers
 
-| Provider | Model Format | Example |
-|---|---|---|
-| **OpenAI** | `openai/<model>` | `openai/gpt-4o` |
-| **Anthropic** | `anthropic/<model>` | `anthropic/claude-sonnet-4-20250514` |
-| **Google Gemini** | `google/<model>` | `google/gemini-2.0-flash` |
-| **Groq** | `groq/<model>` | `groq/llama-3.3-70b-versatile` |
-| **Azure OpenAI** | `azure/<deployment>` | `azure/gpt-4o` |
-| **AWS Bedrock** | `bedrock/<model>` | `bedrock/anthropic.claude-3-haiku-20240307-v1:0` |
-| **Ollama** | `ollama/<model>` | `ollama/llama3.2` |
-| **Sarvam AI** | `sarvam/<model>` | `sarvam/sarvam-2b-v0.5` |
-| **Yotta Labs** | `yotta/<model>` | `yotta/yotta-mini` |
+| Provider | Model format | Example | Requires |
+|---|---|---|---|
+| **OpenAI** | `openai/<model>` | `openai/gpt-4o` | `OPENAI_API_KEY` |
+| **Anthropic** | `anthropic/<model>` | `anthropic/claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
+| **Google Gemini** | `google/<model>` | `google/gemini-2.0-flash` | `GOOGLE_API_KEY` |
+| **Groq** | `groq/<model>` | `groq/llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| **Azure OpenAI** | `azure/<deployment>` | `azure/gpt-4o` | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` |
+| **AWS Bedrock** | `bedrock/<model>` | `bedrock/anthropic.claude-3-haiku-20240307-v1:0` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+| **Ollama** | `ollama/<model>` | `ollama/llama3.2` | `OLLAMA_BASE_URL` (local, no key) |
+| **Sarvam AI** | `sarvam/<model>` | `sarvam/sarvam-2b-v0.5` | `SARVAM_API_KEY` |
+| **Yotta Labs** | `yotta/<model>` | `yotta/yotta-mini` | `YOTTA_API_KEY` |
 
-> The gateway is a **pure proxy**. Any model string the upstream provider accepts will work. When a provider launches a new model, it works through the gateway immediately — zero config changes needed.
+> The gateway is a **pure proxy** — no static model catalog. Any model string your provider accepts works instantly. Zero config changes when new models launch.
 
 ---
 
 ## How to Use
 
-### Use with the OpenAI SDK (zero new dependencies)
+### Drop in with the OpenAI SDK — zero new dependencies
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:4000/v1",
+    base_url="http://localhost:4200/v1",
     api_key="sk-smnd-...",
 )
 
-# Same code you already have — just change the model string
+# Same code you already have — just change base_url and the model string
 response = client.chat.completions.create(
-    model="anthropic/claude-sonnet-4-20250514",   # any provider/model
+    model="anthropic/claude-sonnet-4-20250514",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)
 ```
 
-Works with any OpenAI-compatible library — LangChain, LlamaIndex, CrewAI, Autogen, Vercel AI SDK, etc.
+Works with any OpenAI-compatible library: LangChain, LlamaIndex, CrewAI, Autogen, Vercel AI SDK, etc.
 
-### Use with the Summoned SDK (gateway-native features)
+### Enable gateway features per request
 
-```bash
-npm install @summoned/ai     # TypeScript
-pip install summoned-ai      # Python
-```
+All gateway features are controlled per request via the `x-summoned-config` header (base64 JSON) or the `config` body field:
 
 ```typescript
-import { Summoned } from "@summoned/ai"
-
-const client = new Summoned({ apiKey: "sk-smnd-..." })
-
-const res = await client.chat.completions.create({
-  model: "openai/gpt-4o",
-  messages: [{ role: "user", content: "Hello" }],
-  config: {
-    retry: { attempts: 3, backoff: "exponential" },
-    fallback: ["anthropic/claude-sonnet-4-20250514", "groq/llama-3.3-70b-versatile"],
-    cache: true,
-    guardrails: {
-      input: [{ type: "pii", deny: true }],
-    },
+const response = await fetch("http://localhost:4200/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer sk-smnd-...",
+    "Content-Type": "application/json",
+    "x-summoned-config": btoa(JSON.stringify({
+      retry:    { attempts: 3, backoff: "exponential" },
+      fallback: ["anthropic/claude-haiku-4", "groq/llama-3.3-70b-versatile"],
+      cache:    true,
+      routing:  "cost",           // or "latency"
+      guardrails: {
+        input:  [{ type: "pii", deny: true }],
+      },
+    })),
   },
+  body: JSON.stringify({
+    model: "openai/gpt-4o",
+    messages: [{ role: "user", content: "Summarize this contract" }],
+  }),
 })
-
-console.log(res.choices[0].message.content)
-console.log(client.lastResponseHeaders)
-// { provider: "openai", latencyMs: "320", costUsd: "0.000045", cache: "MISS" }
 ```
 
-### Use OpenAI SDK + Gateway Features via `createHeaders`
+### Response headers
 
-```python
-from openai import OpenAI
-from summoned_ai import create_headers
-
-client = OpenAI(
-    base_url="http://localhost:4000/v1",
-    api_key="sk-smnd-...",
-    default_headers=create_headers(
-        config={"cache": True, "fallback": ["groq/llama-3.3-70b-versatile"]}
-    ),
-)
-```
-
----
-
-## Console
-
-The gateway ships with a **built-in web console** — no extra services, no separate setup. It's served directly from the gateway.
+Every response includes:
 
 ```
-http://localhost:4000/console
+X-Summoned-Provider:    openai
+X-Summoned-Served-By:   openai/gpt-4o
+X-Summoned-Cost-USD:    0.000150
+X-Summoned-Latency-Ms:  432
+X-Summoned-Cache:       MISS
+X-Summoned-Trace-Id:    abc-123
+X-Daily-Budget:         1000000
+X-Daily-Used:           42300
+X-Daily-Remaining:      957700
 ```
-
-| Feature | Description |
-|---|---|
-| **Live Logs** | Real-time request stream via WebSocket. Search, filter by status/provider, click to expand full details. |
-| **Dashboard** | Request counts, success rate, latency percentiles (p50/p95/p99), top models, cost tracking. |
-| **API Keys** | Create, list, and revoke tenant API keys — right from the browser. |
-| **Virtual Keys** | Store encrypted provider credentials (AES-256-GCM). Your users never see raw API keys. |
-| **Providers** | Health status and circuit breaker state for every registered provider. |
-| **Playground** | Send test messages to any model. See provider, latency, cost, and cache status in real-time. |
-
-The console auto-authenticates when served from the gateway — no login required.
 
 ---
 
@@ -227,96 +231,94 @@ The console auto-authenticates when served from the gateway — no login require
 
 | Feature | How it works |
 |---|---|
-| **Automatic Retries** | Retry failed requests with exponential or linear backoff. |
-| **Fallback Models** | Specify alternate `provider/model` slugs to try on failure. |
-| **Circuit Breaker** | Per-provider circuit breaker with configurable thresholds. Prevents cascading failures. |
-| **Request Timeouts** | Per-request timeouts with automatic cancellation. |
+| **Automatic retries** | Exponential or linear backoff. Configurable attempts per request. |
+| **Fallback models** | List alternate `provider/model` slugs. Gateway tries them in order on failure. |
+| **Circuit breaker** | Per-provider. Opens after 5 failures, retries after 30s (HALF_OPEN). |
+| **Request timeouts** | Per-request timeout with automatic cancellation. |
+| **Intelligent routing** | `routing: "cost"` sorts providers cheapest-first. `routing: "latency"` sorts by observed EMA latency tracked in Redis. |
 
 ### Security
 
 | Feature | How it works |
 |---|---|
-| **API Key Auth** | SHA-256 hashed keys with Redis caching for fast lookups. |
-| **Rate Limiting** | Per-key RPM (requests per minute) and TPD (tokens per day) limits. |
-| **Virtual Keys** | Store provider API keys encrypted (AES-256-GCM) on the gateway. Users reference a virtual key ID instead of raw credentials. |
-| **Input/Output Guardrails** | Block PII (email, phone, SSN, Aadhaar, credit card), regex patterns, blocked words, and length limits — on both inputs and outputs. |
+| **API key auth** | SHA-256 hashed `sk-smnd-...` keys. Redis-cached for fast lookups on every request. |
+| **Rate limiting** | Per-key sliding-window RPM. IP-based for BYOK callers. Returns `429` with `Retry-After` header. |
+| **Daily token budget** | Hard cap on `inputTokens + outputTokens` per key per day. Enforced atomically in Redis. Auto-resets at midnight. |
+| **Virtual keys** | Provider credentials stored encrypted (AES-256-GCM via HKDF). Callers reference a `vk_...` ID. |
+| **Guardrails** | Block PII (email, phone, SSN, Aadhaar, credit card), blocked words, regex patterns, length — on input and output. |
+| **Timing-safe auth** | Admin key comparison is constant-time. Prevents timing attacks. |
+| **Body size limit** | Requests over 4 MB rejected with `413`. |
+| **Security headers** | `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, HSTS (in production). |
+| **Admin brute-force protection** | 20 req/min per IP on admin endpoints. Returns `429` on breach. |
 
 ### Performance
 
 | Feature | How it works |
 |---|---|
-| **Response Caching** | Redis-backed cache with configurable TTL. Identical requests return cached responses instantly. |
-| **Cost Tracking** | Per-request cost estimation in USD and INR. Costs included in response headers and logs. |
-| **Streaming** | Full SSE streaming support for all providers. |
+| **Response caching** | Redis-backed. Cache key = SHA-256 of (model + messages + params). Identical requests return cached responses instantly. |
+| **Streaming** | Full SSE streaming on all 9 providers. |
+| **Cost tracking** | Per-request cost in USD and INR. Shown in response headers, logs, and the console dashboard. |
 
-### Per-Request Config
+### Observability
 
-All features are controlled per-request via the `x-summoned-config` header (base64-encoded JSON) or through the SDK's `config` parameter:
-
-```json
-{
-  "retry": { "attempts": 3, "backoff": "exponential" },
-  "fallback": ["groq/llama-3.3-70b-versatile"],
-  "timeout": 30000,
-  "cache": true,
-  "cacheTtl": 3600,
-  "virtualKey": "vk_abc123",
-  "guardrails": {
-    "input": [{ "type": "pii", "deny": true }],
-    "output": [{ "type": "contains", "params": { "operator": "none", "words": ["confidential"] }, "deny": true }]
-  },
-  "metadata": { "env": "production", "user": "u_123" },
-  "traceId": "req-abc-123"
-}
-```
-
-### Response Headers
-
-Every response includes gateway metadata:
-
-```
-X-Summoned-Provider:   openai
-X-Summoned-Served-By:  openai/gpt-4o
-X-Summoned-Cost-USD:   0.000150
-X-Summoned-Latency-Ms: 432
-X-Summoned-Cache:      MISS
-X-Summoned-Trace-Id:   abc-123
-```
+| Feature | How it works |
+|---|---|
+| **Live log stream** | WebSocket stream of every request. See provider, model, latency, cost, status in real-time. |
+| **Prometheus metrics** | `/metrics` endpoint (admin-protected). Scrape with Grafana, Datadog, or any Prometheus-compatible tool. |
+| **OpenTelemetry** | Distributed traces exported to any OTLP backend (Jaeger, Grafana Tempo, Honeycomb). |
 
 ---
 
 ## API Reference
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/v1/chat/completions` | POST | OpenAI-compatible chat completion (streaming + tools) |
-| `/v1/embeddings` | POST | Text embeddings |
-| `/v1/models` | GET | List registered providers |
-| `/v1/keys` | POST / GET / DELETE | API key management (admin) |
-| `/admin/virtual-keys` | POST / GET / DELETE | Virtual key management (admin) |
-| `/admin/logs` | GET | Request logs (buffer or database) |
-| `/admin/stats` | GET | Aggregated statistics |
-| `/admin/providers` | GET | Provider health + circuit breaker state |
-| `/ws/logs` | WebSocket | Real-time log streaming |
-| `/health` | GET | Liveness check |
-| `/console` | GET | Built-in web console |
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `/v1/chat/completions` | POST | Gateway key or `x-provider-key` | OpenAI-compatible chat completion (streaming + tools) |
+| `/v1/embeddings` | POST | Gateway key | Text embeddings |
+| `/v1/models` | GET | — | List registered providers |
+| `/v1/keys` | POST / GET / DELETE | `x-admin-key` | API key management |
+| `/admin/virtual-keys` | POST / GET / DELETE | `x-admin-key` | Virtual key management |
+| `/admin/logs` | GET | `x-admin-key` | Request logs |
+| `/admin/stats` | GET | `x-admin-key` | Aggregated statistics |
+| `/admin/providers` | GET | `x-admin-key` | Provider health + circuit breaker state |
+| `/metrics` | GET | `x-admin-key` | Prometheus metrics |
+| `/ws/logs` | WebSocket | `?key=ADMIN_KEY` | Real-time log streaming |
+| `/health` | GET | — | Liveness check |
+| `/health/ready` | GET | — | Readiness check (Postgres + Redis) |
+| `/console` | GET | — | Built-in web console |
 
 ---
 
-## SDKs
+## Configuration
 
-| SDK | Package | Install |
-|---|---|---|
-| TypeScript | [`@summoned/ai`](https://github.com/summoned-tech/summoned-sdk-ts) | `npm install @summoned/ai` |
-| Python | [`summoned-ai`](https://github.com/summoned-tech/summoned-sdk-python) | `pip install summoned-ai` |
+See [`.env.example`](.env.example) for the full list with links to each provider's key page.
 
-Both SDKs provide: chat completions, embeddings, streaming, admin APIs (keys, virtual keys, logs, stats, providers), `createHeaders()` helper, client-side retries, and debug mode. They're thin HTTP clients — all the intelligence lives on the gateway.
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ADMIN_API_KEY` | Yes | — | Master admin key (min 32 chars). `openssl rand -hex 32` |
+| `VIRTUAL_KEY_SECRET` | Recommended | Falls back to `ADMIN_API_KEY` | Separate encryption key for virtual keys. `openssl rand -hex 32` |
+| `POSTGRES_URL` | Yes | — | PostgreSQL connection string |
+| `REDIS_URL` | No | `redis://localhost:6379` | Redis connection string |
+| `GATEWAY_PORT` | No | `4200` | Port to listen on |
+| `GATEWAY_REQUIRE_AUTH` | No | `true` | Set `false` to allow unauthenticated requests (trusted networks only) |
+| `PUBLIC_RPM_LIMIT` | No | `60` | RPM cap for BYOK / unauthenticated callers |
+| `OPENAI_API_KEY` | At least one provider | — | OpenAI API key |
+| `ANTHROPIC_API_KEY` | | — | Anthropic API key |
+| `GOOGLE_API_KEY` | | — | Google Gemini API key |
+| `GROQ_API_KEY` | | — | Groq API key |
+| `AZURE_OPENAI_API_KEY` | | — | Azure OpenAI key + `AZURE_OPENAI_ENDPOINT` |
+| `AWS_ACCESS_KEY_ID` | | — | AWS credentials for Bedrock |
+| `OLLAMA_BASE_URL` | | — | Ollama server URL (no key needed) |
+| `SARVAM_API_KEY` | | — | Sarvam AI key |
+| `YOTTA_API_KEY` | | — | Yotta Labs key |
+| `USD_INR_RATE` | No | `85` | Exchange rate for INR cost display |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | — | OpenTelemetry collector URL |
 
 ---
 
 ## Adding a New Provider
 
-Adding a provider takes **~10 lines of code** and **~5 minutes**:
+Takes **~10 lines of code** and **~5 minutes**:
 
 **1.** Create `src/providers/your-provider.ts`:
 
@@ -339,73 +341,52 @@ export function createYourProvider(apiKey: string) {
 YOURPROVIDER_API_KEY: z.string().default(""),
 ```
 
-**3.** Register it in `src/index.ts`:
+**3.** Register in `src/index.ts`:
 
 ```typescript
 if (env.YOURPROVIDER_API_KEY) {
   const { createYourProvider } = await import("@/providers/your-provider")
   registry.register(createYourProvider(env.YOURPROVIDER_API_KEY))
-  registered.push("yourprovider")
 }
 ```
 
-**4.** Add pricing to `src/lib/pricing.ts` (optional).
+**4.** Add pricing to `src/lib/pricing.ts` (optional — zero cost shown if omitted).
 
-That's it. The gateway is a pure proxy — the upstream provider handles model validation.
-
----
-
-## Configuration
-
-See [`.env.example`](.env.example) for the complete list with links to each provider's key page.
-
-| Variable | Required | Description |
-|---|---|---|
-| `ADMIN_API_KEY` | Yes | Master admin key (min 32 chars). Generate: `openssl rand -hex 32` |
-| `POSTGRES_URL` | Yes | PostgreSQL connection string |
-| `OPENAI_API_KEY` | At least one | OpenAI key |
-| `ANTHROPIC_API_KEY` | provider key | Anthropic key |
-| `GOOGLE_API_KEY` | needed | Google Gemini key |
-| `GROQ_API_KEY` | | Groq key |
-| `AZURE_OPENAI_API_KEY` | | Azure OpenAI key + `AZURE_OPENAI_ENDPOINT` |
-| `AWS_ACCESS_KEY_ID` | | AWS credentials for Bedrock |
-| `OLLAMA_BASE_URL` | | Ollama server URL (no key needed) |
-| `SARVAM_API_KEY` | | Sarvam AI key |
-| `YOTTA_API_KEY` | | Yotta Labs key |
-| `REDIS_URL` | No | Default: `redis://localhost:6379` |
-| `GATEWAY_PORT` | No | Default: `4000` |
-| `USD_INR_RATE` | No | Default: `85` |
+See [CONTRIBUTING.md](CONTRIBUTING.md) for a full step-by-step walkthrough.
 
 ---
 
 ## Development
 
 ```bash
-make setup          # Full zero-to-running setup
+make setup          # Full setup: deps + Postgres + Redis + migrations + console build
 make dev            # Gateway with hot reload
-make dev-console    # Console dev server with HMR
+make dev-console    # Console Vite dev server with HMR
 make console        # Rebuild console SPA
-make check-types    # TypeScript type checking
+make check-types    # TypeScript type check
 make migrate        # Generate + apply DB migrations
-make docker         # Docker Compose up
-make create-key     # Quick-create an API key
+make create-key     # Quick-create an API key for testing
 make help           # Show all commands
 ```
 
+---
+
 ## Contributing
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
+We welcome contributions. The easiest starting point is adding a new LLM provider — it's ~10 lines of code.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 - Development setup
 - Architecture overview
 - How to add a provider (step-by-step)
 - How to add new features
 - Code style guide
 
-The easiest way to contribute is to add support for a new LLM provider — it's about 10 lines of code.
+---
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) — free to use, fork, modify, and self-host. No restrictions.
 
 ---
 

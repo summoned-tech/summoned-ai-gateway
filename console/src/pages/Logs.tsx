@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react"
-import { useLogStream } from "../lib/useWebSocket"
+import { useLogStream, setAdminKey } from "../lib/useWebSocket"
 import type { LogEntry } from "../lib/api"
 
 const STATUS_STYLES: Record<string, string> = {
@@ -60,7 +60,8 @@ function Field({ label, value, mono }: { label: string; value: React.ReactNode; 
 }
 
 export default function Logs() {
-  const { logs, connected, clear } = useLogStream()
+  const { logs, connected, authError, clear } = useLogStream()
+  const [keyInput, setKeyInput] = useState("")
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("all")
   const [providerFilter, setProviderFilter] = useState("all")
@@ -82,6 +83,44 @@ export default function Logs() {
       return true
     })
   }, [logs, search, statusFilter, providerFilter])
+
+  // Auth error gate — show key prompt instead of the full log UI
+  if (authError) {
+    return (
+      <div className="h-full flex items-center justify-center bg-gray-50">
+        <div className="bg-white border border-gray-200 rounded-xl p-8 shadow-sm w-full max-w-sm">
+          <div className="flex items-center gap-3 mb-5">
+            <div className="w-10 h-10 bg-red-50 border border-red-200 rounded-lg flex items-center justify-center">
+              <svg className="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">Admin key required</h3>
+              <p className="text-xs text-gray-500">Live logs are protected</p>
+            </div>
+          </div>
+          <input
+            type="password"
+            value={keyInput}
+            onChange={(e) => setKeyInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && keyInput.trim()) {
+                setAdminKey(keyInput.trim())
+                window.location.reload()
+              }
+            }}
+            placeholder="Enter ADMIN_API_KEY..."
+            className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400 mb-3"
+          />
+          <button
+            onClick={() => { if (keyInput.trim()) { setAdminKey(keyInput.trim()); window.location.reload() } }}
+            className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-md transition-colors"
+          >
+            Connect
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="h-full flex flex-col">

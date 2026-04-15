@@ -1,11 +1,11 @@
 import { Hono } from "hono"
 import { embed, embedMany } from "ai"
-import { nanoid } from "nanoid"
 import { z } from "zod"
 
 import { registry } from "@/providers/registry"
 import { calculateCost } from "@/lib/pricing"
 import { logger } from "@/lib/telemetry"
+import { env } from "@/lib/env"
 import type { AuthContext } from "@/middlewares/auth"
 
 const embeddingRequestSchema = z.object({
@@ -66,8 +66,14 @@ embeddingsRouter.post("/embeddings", async (c: any) => {
     })
   } catch (err) {
     logger.error({ err, model: req.model }, "embedding request failed")
+    // Never expose raw provider error messages in production — they can contain
+    // internal hostnames, key hints, or rate-limit details useful to attackers.
+    const isLocal = env.NODE_ENV === "local"
     return c.json({
-      error: { code: "UPSTREAM_ERROR", message: err instanceof Error ? err.message : String(err) },
+      error: {
+        code: "UPSTREAM_ERROR",
+        message: isLocal && err instanceof Error ? err.message : "Embedding request failed",
+      },
     }, 502)
   }
 })

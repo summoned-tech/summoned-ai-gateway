@@ -49,6 +49,18 @@ const PRICING: Record<string, { input: number; output: number }> = {
   "bedrock:amazon.nova-micro-v1:0":    { input: 0.035, output: 0.14 },
 }
 
+/**
+ * Return the input cost per 1M tokens for a model alias like "openai/gpt-4o".
+ * Returns Infinity for unknown models so they sort last in cost routing.
+ */
+export function getInputCostPer1M(alias: string): number {
+  const slash = alias.indexOf("/")
+  if (slash === -1) return Infinity
+  const providerId = alias.slice(0, slash)
+  const modelId = alias.slice(slash + 1)
+  return PRICING[`${providerId}:${modelId}`]?.input ?? Infinity
+}
+
 export function calculateCost(
   providerId: string,
   modelId: string,

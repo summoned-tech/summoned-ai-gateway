@@ -1,4 +1,5 @@
 import { initTracing, shutdownTracing, logger } from "@/lib/telemetry"
+import { timingSafeEqual } from "@/lib/crypto"
 
 initTracing()
 
@@ -13,6 +14,12 @@ import { requestIdMiddleware } from "@/middlewares/request-id"
 import { telemetryMiddleware } from "@/middlewares/telemetry"
 import { authMiddleware } from "@/middlewares/auth"
 import { rateLimitMiddleware } from "@/middlewares/rate-limit"
+import {
+  securityHeadersMiddleware,
+  bodySizeLimitMiddleware,
+  metricsAuthMiddleware,
+  adminRateLimitMiddleware,
+} from "@/middlewares/security"
 import { healthRouter } from "@/routers/health"
 import { metricsRouter } from "@/routers/metrics"
 import { completionsRouter } from "@/routers/completions"
@@ -28,6 +35,8 @@ let ready = false
 const app = new Hono()
   .use("*", cors())
   .use("*", requestIdMiddleware)
+  .use("*", securityHeadersMiddleware)
+  .use("*", bodySizeLimitMiddleware)
   .use("*", telemetryMiddleware)
   .onError(errorHandler)
 
@@ -50,6 +59,9 @@ app.route("/console/api", consoleApi)
 
 // Public endpoints
 app.route("/health", healthRouter)
+
+// Metrics — protected: exposes tenant IDs, token volumes, error rates
+app.use("/metrics", metricsAuthMiddleware)
 app.route("/metrics", metricsRouter)
 
 // Readiness gate
@@ -71,28 +83,45 @@ const v1 = new Hono()
 
 app.route("/v1", v1)
 
-// Admin endpoints (separate auth via x-admin-key)
+// Admin endpoints (separate auth via x-admin-key + brute-force protection)
+app.use("/admin/*", adminRateLimitMiddleware)
 app.route("/admin", adminRouter)
 app.route("/admin/virtual-keys", virtualKeysRouter)
 
-// WebSocket endpoint for real-time log streaming
+// WebSocket endpoint for real-time log streaming — admin-only
 app.get("/ws/logs", (c: any) => {
   const upgrade = c.req.header("upgrade")
   if (upgrade?.toLowerCase() !== "websocket") {
     return c.json({ error: "Expected WebSocket upgrade" }, 426)
   }
 
-  // Bun-native WebSocket upgrade
-  const server = (c.env as any)?.server ?? (globalThis as any).server
+  // Require admin key via query param (headers cannot be set by the browser WS API)
+  // The console is served from the same origin so it passes the key as ?key=...
+  const adminKey = c.req.query("key")
+  if (!adminKey || !timingSafeEqual(adminKey, env.ADMIN_API_KEY)) {
+    return c.json({ error: { code: "UNAUTHORIZED", message: "Valid admin key required" } }, 401)
+  }
+
+  // Bun exposes the server as the second arg to fetch(); Hono stores it as c.env.
+  // We also keep a globalThis reference set by Bun.serve() in main().
+  const server = (globalThis as any).__bunServer ?? (c.env as any)
   if (server?.upgrade) {
     const success = server.upgrade(c.req.raw)
-    if (success) return undefined
+    // When upgrade succeeds Bun takes ownership of the socket and ignores any
+    // HTTP response we return — so we return an empty 200 to satisfy Hono.
+    if (success) return new Response()
   }
 
   return c.json({ error: "WebSocket upgrade failed" }, 500)
 })
 
 export type AppType = typeof app
+
+// ---------------------------------------------------------------------------
+// WebSocket clients — stored module-level so handler and subscriber share state
+// ---------------------------------------------------------------------------
+
+const wsClients = new Set<any>()
 
 // ---------------------------------------------------------------------------
 // Provider registration — enable providers based on available env vars
@@ -193,50 +222,31 @@ async function main() {
   ready = true
 
   logger.info({
-    port: env.GATEWAY_PORT,
     nodeEnv: env.NODE_ENV,
     providers,
     providerCount: providers.length,
-    console: `http://localhost:${env.GATEWAY_PORT}/console`,
+    requireAuth: env.GATEWAY_REQUIRE_AUTH,
   }, "summoned-gateway ready")
 }
-
-main().catch((err) => {
-  logger.fatal({ err }, "gateway failed to start")
-  process.exit(1)
-})
-
-process.on("SIGTERM", async () => {
-  logger.info("shutting down gateway")
-  await shutdownTracing()
-  await redis.quit()
-  process.exit(0)
-})
 
 // ---------------------------------------------------------------------------
 // WebSocket handler for real-time log streaming (Bun native)
 // ---------------------------------------------------------------------------
 
-const wsClients = new Set<any>()
-
-export default {
-  port: env.GATEWAY_PORT,
-  fetch: app.fetch,
-  websocket: {
-    open(ws: any) {
-      wsClients.add(ws)
-      // Send recent logs on connect so the console loads instantly
-      const recent = getRecentLogs(100)
-      ws.send(JSON.stringify({ type: "init", logs: recent }))
-      logger.debug({ clients: wsClients.size }, "ws client connected")
-    },
-    close(ws: any) {
-      wsClients.delete(ws)
-      logger.debug({ clients: wsClients.size }, "ws client disconnected")
-    },
-    message(_ws: any, _msg: any) {
-      // No inbound messages expected; ignore
-    },
+const websocketConfig = {
+  open(ws: any) {
+    wsClients.add(ws)
+    // Send recent logs on connect so the console loads instantly
+    const recent = getRecentLogs(100)
+    ws.send(JSON.stringify({ type: "init", logs: recent }))
+    logger.debug({ clients: wsClients.size }, "ws client connected")
+  },
+  close(ws: any) {
+    wsClients.delete(ws)
+    logger.debug({ clients: wsClients.size }, "ws client disconnected")
+  },
+  message(_ws: any, _msg: any) {
+    // No inbound messages expected; ignore
   },
 }
 
@@ -246,4 +256,32 @@ subscribe((entry) => {
   for (const ws of wsClients) {
     try { ws.send(payload) } catch { wsClients.delete(ws) }
   }
+})
+
+// ---------------------------------------------------------------------------
+// Startup — use explicit Bun.serve() so we can store the server reference
+// in globalThis for the WebSocket upgrade handler.
+// ---------------------------------------------------------------------------
+
+main()
+  .then(() => {
+    const server = Bun.serve({
+      port: env.GATEWAY_PORT,
+      fetch: app.fetch,
+      websocket: websocketConfig,
+    })
+    // Store for use in the /ws/logs upgrade handler
+    ;(globalThis as any).__bunServer = server
+    logger.info({ port: env.GATEWAY_PORT, console: `http://localhost:${env.GATEWAY_PORT}/console` }, "http server listening")
+  })
+  .catch((err) => {
+    logger.fatal({ err }, "gateway failed to start")
+    process.exit(1)
+  })
+
+process.on("SIGTERM", async () => {
+  logger.info("shutting down gateway")
+  await shutdownTracing()
+  await redis.quit()
+  process.exit(0)
 })

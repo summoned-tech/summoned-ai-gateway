@@ -75,6 +75,7 @@ export interface StatsResponse {
   topModels: { model: string; provider: string; count: number; totalTokens: number }[]
   activeApiKeys: number
   providers: string[]
+  costUsd?: number
 }
 
 export interface ProviderInfo {
@@ -82,6 +83,7 @@ export interface ProviderInfo {
   name: string
   supportsEmbeddings: boolean
   health: { state: "closed" | "open" | "half_open"; failures: number }
+  avgLatencyMs: number | null
 }
 
 export interface ApiKeyResult {

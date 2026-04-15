@@ -4,14 +4,16 @@ import { db, requestLog, apiKey } from "@/lib/db"
 import { getRecentLogs, getLogCount } from "@/lib/log-buffer"
 import { registry } from "@/providers/registry"
 import { getProviderHealth } from "@/lib/circuit-breaker"
+import { getProviderAvgLatency } from "@/lib/routing"
+import { timingSafeEqual } from "@/lib/crypto"
 import { env } from "@/lib/env"
 
 const admin = new Hono()
 
 admin.use("*", async (c: any, next: any) => {
   if (c.get("consoleAuth")) return next()
-  const key = c.req.header("x-admin-key")
-  if (!key || key !== env.ADMIN_API_KEY) {
+  const key = c.req.header("x-admin-key") ?? ""
+  if (!timingSafeEqual(key, env.ADMIN_API_KEY)) {
     return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid admin key" } }, 401)
   }
   return next()
@@ -66,6 +68,7 @@ admin.get("/stats", async (c: any) => {
       errorCount: sql<number>`count(*) filter (where ${requestLog.status} = 'error')`,
       totalInputTokens: sql<number>`coalesce(sum(${requestLog.inputTokens}), 0)`,
       totalOutputTokens: sql<number>`coalesce(sum(${requestLog.outputTokens}), 0)`,
+      totalCostUsd: sql<number>`coalesce(sum(${requestLog.costUsd}), 0)`,
       avgLatencyMs: sql<number>`coalesce(avg(${requestLog.latencyMs}), 0)`,
       p50LatencyMs: sql<number>`coalesce(percentile_cont(0.5) within group (order by ${requestLog.latencyMs}), 0)`,
       p95LatencyMs: sql<number>`coalesce(percentile_cont(0.95) within group (order by ${requestLog.latencyMs}), 0)`,
@@ -114,6 +117,7 @@ admin.get("/stats", async (c: any) => {
       p95: Math.round(Number(totals.p95LatencyMs)),
       p99: Math.round(Number(totals.p99LatencyMs)),
     },
+    costUsd: Number(Number(totals.totalCostUsd).toFixed(6)),
     topModels,
     activeApiKeys: Number(activeKeys[0]?.count ?? 0),
     providers: registry.allIds(),
@@ -124,14 +128,17 @@ admin.get("/stats", async (c: any) => {
 // GET /admin/providers — list enabled providers + health status
 // ---------------------------------------------------------------------------
 
-admin.get("/providers", (c: any) => {
+admin.get("/providers", async (c: any) => {
   const health = getProviderHealth()
-  const providers = registry.all().map((p) => ({
-    id: p.id,
-    name: p.name,
-    supportsEmbeddings: !!p.getEmbeddingModel,
-    health: health[p.id] ?? { state: "closed", failures: 0 },
-  }))
+  const providers = await Promise.all(
+    registry.all().map(async (p) => ({
+      id: p.id,
+      name: p.name,
+      supportsEmbeddings: !!p.getEmbeddingModel,
+      health: health[p.id] ?? { state: "closed", failures: 0 },
+      avgLatencyMs: await getProviderAvgLatency(p.id),
+    })),
+  )
   return c.json({ data: providers })
 })
 

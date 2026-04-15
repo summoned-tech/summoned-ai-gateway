@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm"
 import { db, apiKey } from "@/lib/db"
 import { redis } from "@/lib/redis"
 import { logger } from "@/lib/telemetry"
+import { env } from "@/lib/env"
 
 export interface AuthContext {
   apiKeyId: string
@@ -21,8 +22,48 @@ async function hashKey(raw: string): Promise<string> {
 
 export const authMiddleware = createMiddleware<{ Variables: AuthContext }>(async (c, next) => {
   const authHeader = c.req.header("authorization")
+  const providerKey = c.req.header("x-provider-key")
+
+  // ---------------------------------------------------------------------------
+  // BYOK mode — caller supplies their own provider key via x-provider-key header.
+  // No summoned API key required. Rate-limited per source IP.
+  // ---------------------------------------------------------------------------
+  if (providerKey && !authHeader) {
+    logger.debug({ path: c.req.path }, "byok request — skipping summoned auth")
+    c.set("apiKeyId", "byok")
+    c.set("tenantId", "public")
+    c.set("rateLimitRpm", env.PUBLIC_RPM_LIMIT)
+    c.set("rateLimitTpd", 0)
+    return next()
+  }
+
+  // ---------------------------------------------------------------------------
+  // No-auth mode — operator has disabled authentication entirely.
+  // Useful for private self-hosted deployments on a trusted network.
+  // ---------------------------------------------------------------------------
+  if (!env.GATEWAY_REQUIRE_AUTH && !authHeader) {
+    c.set("apiKeyId", "anonymous")
+    c.set("tenantId", "public")
+    c.set("rateLimitRpm", env.PUBLIC_RPM_LIMIT)
+    c.set("rateLimitTpd", 0)
+    return next()
+  }
+
+  // ---------------------------------------------------------------------------
+  // Managed mode — validate summoned API key (sk-smnd-...)
+  // ---------------------------------------------------------------------------
   if (!authHeader?.startsWith("Bearer ")) {
-    return c.json({ error: { code: "UNAUTHORIZED", message: "Missing or invalid Authorization header" } }, 401)
+    return c.json(
+      {
+        error: {
+          code: "UNAUTHORIZED",
+          message: env.GATEWAY_REQUIRE_AUTH
+            ? "Missing Authorization header. Use 'Bearer sk-smnd-...' or pass 'x-provider-key' for BYOK mode."
+            : "Missing Authorization header.",
+        },
+      },
+      401,
+    )
   }
 
   const rawKey = authHeader.slice(7)

@@ -80,14 +80,18 @@ export function listModels(providerId?: string): ModelDefinition[] {
 
 /**
  * Return input cost per 1M tokens for a "provider/model" alias.
- * Used for cost-based routing — returns Infinity for unknowns so they sort last.
+ * Used for cost-based routing.
+ *
+ * Unknown models return 0 (not Infinity) so they are treated as "potentially
+ * cheapest" and still included in the routing order rather than excluded.
+ * The caller should handle unknown cost explicitly if needed.
  */
 export function getInputCostPer1M(alias: string): number {
   const slash = alias.indexOf("/")
-  if (slash === -1) return Infinity
+  if (slash === -1) return 0
   const providerId = alias.slice(0, slash)
   const modelId = alias.slice(slash + 1)
-  return registry.get(`${providerId}:${modelId}`)?.inputPricePer1M ?? Infinity
+  return registry.get(`${providerId}:${modelId}`)?.inputPricePer1M ?? 0
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +103,8 @@ export interface CostResult {
   costInr: number
   inputCostUsd: number
   outputCostUsd: number
+  /** True when the model is not in our pricing catalog — cost figures are $0 and unreliable. */
+  priceUnknown: boolean
 }
 
 export function calculateCost(
@@ -109,8 +115,14 @@ export function calculateCost(
 ): CostResult {
   const model = registry.get(`${providerId}:${modelId}`)
 
-  if (!model || (!model.inputPricePer1M && !model.outputPricePer1M)) {
-    return { costUsd: 0, costInr: 0, inputCostUsd: 0, outputCostUsd: 0 }
+  // Model not in catalog — request still works, cost is genuinely unknown (not free).
+  if (!model) {
+    return { costUsd: 0, costInr: 0, inputCostUsd: 0, outputCostUsd: 0, priceUnknown: true }
+  }
+
+  // Model in catalog but pricing not set (e.g. Ollama, free-tier models).
+  if (!model.inputPricePer1M && !model.outputPricePer1M) {
+    return { costUsd: 0, costInr: 0, inputCostUsd: 0, outputCostUsd: 0, priceUnknown: false }
   }
 
   const inputCostUsd  = (inputTokens  / 1_000_000) * model.inputPricePer1M
@@ -118,5 +130,5 @@ export function calculateCost(
   const costUsd       = inputCostUsd + outputCostUsd
   const costInr       = costUsd * env.USD_INR_RATE
 
-  return { costUsd, costInr, inputCostUsd, outputCostUsd }
+  return { costUsd, costInr, inputCostUsd, outputCostUsd, priceUnknown: false }
 }

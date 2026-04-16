@@ -179,7 +179,7 @@ async function resolveModelForAlias(alias: string, byokKey: string | null) {
 
 export const completionsRouter = new Hono<{ Variables: AuthContext }>()
 
-// Helper: write to DB + push to in-memory log buffer
+// Helper: write to DB (when available) + push to in-memory log buffer
 function emitLog(vals: {
   id: string; apiKeyId: string; tenantId: string; userId?: string | null; organizationId?: string | null;
   requestedModel: string; resolvedModel: string; provider: string;
@@ -187,7 +187,10 @@ function emitLog(vals: {
   streaming: boolean; status: "success" | "error"; errorMessage?: string;
   costUsd?: number; costInr?: number; cacheHit?: boolean;
 }) {
-  db.insert(requestLog).values(vals).catch((err: unknown) => logger.error({ err }, "failed to write request log"))
+  // Only persist to DB when Postgres is configured; always push to in-memory log buffer
+  if (process.env.POSTGRES_URL) {
+    db.insert(requestLog).values(vals).catch((err: unknown) => logger.error({ err }, "failed to write request log"))
+  }
   pushLog({
     id: vals.id,
     timestamp: new Date().toISOString(),

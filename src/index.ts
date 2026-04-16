@@ -8,7 +8,7 @@ import { cors } from "hono/cors"
 import { serveStatic } from "hono/bun"
 
 import { env } from "@/lib/env"
-import { redis } from "@/lib/redis"
+import { redis, isRedisEnabled } from "@/lib/redis"
 import { errorHandler } from "@/lib/error"
 import { requestIdMiddleware } from "@/middlewares/request-id"
 import { telemetryMiddleware } from "@/middlewares/telemetry"
@@ -203,6 +203,77 @@ async function registerProviders() {
     registered.push("yotta")
   }
 
+  // Mistral AI
+  if (env.MISTRAL_API_KEY) {
+    const { createMistralProvider } = await import("@/providers/mistral")
+    registry.register(createMistralProvider(env.MISTRAL_API_KEY))
+    registered.push("mistral")
+  }
+
+  // Together AI
+  if (env.TOGETHER_API_KEY) {
+    const { createTogetherProvider } = await import("@/providers/together")
+    registry.register(createTogetherProvider(env.TOGETHER_API_KEY))
+    registered.push("together")
+  }
+
+  // DeepSeek
+  if (env.DEEPSEEK_API_KEY) {
+    const { createDeepSeekProvider } = await import("@/providers/deepseek")
+    registry.register(createDeepSeekProvider(env.DEEPSEEK_API_KEY))
+    registered.push("deepseek")
+  }
+
+  // Fireworks AI
+  if (env.FIREWORKS_API_KEY) {
+    const { createFireworksProvider } = await import("@/providers/fireworks")
+    registry.register(createFireworksProvider(env.FIREWORKS_API_KEY))
+    registered.push("fireworks")
+  }
+
+  // Cohere
+  if (env.COHERE_API_KEY) {
+    const { createCohereProvider } = await import("@/providers/cohere")
+    registry.register(createCohereProvider(env.COHERE_API_KEY))
+    registered.push("cohere")
+  }
+
+  // Cerebras
+  if (env.CEREBRAS_API_KEY) {
+    const { createCerebrasProvider } = await import("@/providers/cerebras")
+    registry.register(createCerebrasProvider(env.CEREBRAS_API_KEY))
+    registered.push("cerebras")
+  }
+
+  // Perplexity
+  if (env.PERPLEXITY_API_KEY) {
+    const { createPerplexityProvider } = await import("@/providers/perplexity")
+    registry.register(createPerplexityProvider(env.PERPLEXITY_API_KEY))
+    registered.push("perplexity")
+  }
+
+  // xAI / Grok
+  if (env.XAI_API_KEY) {
+    const { createXAIProvider } = await import("@/providers/xai")
+    registry.register(createXAIProvider(env.XAI_API_KEY))
+    registered.push("xai")
+  }
+
+  // Custom OpenAI-compatible providers via CUSTOM_PROVIDERS env var
+  if (env.CUSTOM_PROVIDERS) {
+    try {
+      const customs: Array<{ id: string; name: string; baseUrl: string; apiKey: string }> = JSON.parse(env.CUSTOM_PROVIDERS)
+      const { createOpenAICompatProvider } = await import("@/providers/openai-compat")
+      for (const c of customs) {
+        if (!c.id || !c.baseUrl || !c.apiKey) continue
+        registry.register(createOpenAICompatProvider({ id: c.id, name: c.name ?? c.id, apiKey: c.apiKey, baseURL: c.baseUrl }))
+        registered.push(c.id)
+      }
+    } catch (err) {
+      logger.warn({ err }, "failed to parse CUSTOM_PROVIDERS — ensure it is valid JSON")
+    }
+  }
+
   return registered
 }
 
@@ -211,7 +282,16 @@ async function registerProviders() {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  await redis.connect()
+  if (isRedisEnabled) {
+    await (redis as any).connect()
+    logger.info("redis connected")
+  } else {
+    logger.warn("REDIS_URL not set — running without Redis. Rate limiting, caching, and latency routing use in-memory fallbacks.")
+  }
+
+  if (!env.POSTGRES_URL) {
+    logger.warn("POSTGRES_URL not set — running in stateless mode. Request logs, managed API keys, and the analytics console are disabled. Use x-provider-key for BYOK or set GATEWAY_REQUIRE_AUTH=false.")
+  }
 
   const providers = await registerProviders()
 
@@ -282,6 +362,6 @@ main()
 process.on("SIGTERM", async () => {
   logger.info("shutting down gateway")
   await shutdownTracing()
-  await redis.quit()
+  if (isRedisEnabled) await (redis as any).quit()
   process.exit(0)
 })

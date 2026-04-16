@@ -49,6 +49,34 @@ const schema = z.object({
   // Yotta Labs (Indian GPU cloud gateway)
   YOTTA_API_KEY: z.string().default(""),
 
+  // Mistral AI
+  MISTRAL_API_KEY: z.string().default(""),
+
+  // Together AI
+  TOGETHER_API_KEY: z.string().default(""),
+
+  // DeepSeek
+  DEEPSEEK_API_KEY: z.string().default(""),
+
+  // Fireworks AI
+  FIREWORKS_API_KEY: z.string().default(""),
+
+  // Cohere
+  COHERE_API_KEY: z.string().default(""),
+
+  // Cerebras
+  CEREBRAS_API_KEY: z.string().default(""),
+
+  // Perplexity
+  PERPLEXITY_API_KEY: z.string().default(""),
+
+  // xAI / Grok
+  XAI_API_KEY: z.string().default(""),
+
+  // Custom OpenAI-compatible providers — JSON array of {id, name, baseUrl, apiKey}
+  // Example: [{"id":"myprovider","name":"My LLM","baseUrl":"https://api.example.com/v1","apiKey":"sk-..."}]
+  CUSTOM_PROVIDERS: z.string().default(""),
+
   // ---------------------------------------------------------------------------
   // Infrastructure
   // ---------------------------------------------------------------------------
@@ -71,8 +99,8 @@ const schema = z.object({
   // PostgreSQL — audit logs, API keys (optional when GATEWAY_REQUIRE_AUTH=false)
   POSTGRES_URL: z.string().default(""),
 
-  // Redis — rate limiting, key cache
-  REDIS_URL: z.string().default("redis://localhost:6379"),
+  // Redis — rate limiting, caching, latency EMA (optional; in-memory fallbacks used when absent)
+  REDIS_URL: z.string().default(""),
 
   // Observability
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().default(""),

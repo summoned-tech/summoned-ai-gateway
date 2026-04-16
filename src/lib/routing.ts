@@ -1,6 +1,9 @@
-import { redis } from "@/lib/redis"
+import { redis, isRedisEnabled } from "@/lib/redis"
 import { logger } from "@/lib/telemetry"
 import { getInputCostPer1M } from "@/lib/pricing"
+
+// In-memory EMA store when Redis is not available
+const memLatency = new Map<string, number>()
 
 /**
  * Routing strategies — applied to the model chain before the first attempt.
@@ -36,6 +39,11 @@ function latencyKey(providerId: string) {
  * Updates an EMA in Redis: new_avg = 0.8 * old_avg + 0.2 * sample
  */
 export async function recordProviderLatency(providerId: string, latencyMs: number): Promise<void> {
+  if (!isRedisEnabled) {
+    const prev = memLatency.get(providerId) ?? latencyMs
+    memLatency.set(providerId, (1 - LATENCY_EMA_ALPHA) * prev + LATENCY_EMA_ALPHA * latencyMs)
+    return
+  }
   const key = latencyKey(providerId)
   try {
     const current = await redis.get(key)
@@ -49,6 +57,7 @@ export async function recordProviderLatency(providerId: string, latencyMs: numbe
 
 /** Get the average observed latency for a provider (ms). Returns null if no data. */
 export async function getProviderAvgLatency(providerId: string): Promise<number | null> {
+  if (!isRedisEnabled) return memLatency.get(providerId) ?? null
   try {
     const val = await redis.get(latencyKey(providerId))
     return val ? Number(val) : null

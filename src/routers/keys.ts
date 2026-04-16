@@ -14,7 +14,20 @@ import { logger } from "@/lib/telemetry"
 // Used to provision keys for tenants. Not exposed in the public API surface.
 // ---------------------------------------------------------------------------
 
+const DB_REQUIRED_RESPONSE = {
+  error: {
+    code: "DB_REQUIRED",
+    message: "API key management requires POSTGRES_URL. Running in stateless mode.",
+  },
+}
+
 export const keysRouter = new Hono()
+
+// Block all key management routes when DB is not configured
+keysRouter.use("*", async (c: any, next: any) => {
+  if (!process.env.POSTGRES_URL) return c.json(DB_REQUIRED_RESPONSE, 503)
+  return next()
+})
 
 function requireAdmin() {
   return async (c: any, next: any) => {

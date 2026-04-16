@@ -153,6 +153,74 @@ export async function createBedrockProvider(): Promise<ProviderAdapter> {
   return _bedrockAdapter
 }
 
+// ---------------------------------------------------------------------------
+// BYOK factory — creates a per-request, non-singleton adapter using a caller-
+// supplied AWS Bedrock bearer token (AWS_BEARER_TOKEN_BEDROCK-style key).
+//
+// x-provider-key header format accepted by the gateway:
+//   "[region|]bearer-token"
+//   "us-east-1|your-bedrock-api-key"  → region=us-east-1
+//   "your-bedrock-api-key"            → falls back to env.AWS_REGION
+// ---------------------------------------------------------------------------
+
+export async function createBedrockByokProvider(
+  bearerToken: string,
+  region?: string,
+): Promise<ProviderAdapter> {
+  const { createAmazonBedrock } = await import("@ai-sdk/amazon-bedrock")
+
+  const resolvedRegion = region ?? env.AWS_REGION
+
+  // Use Record<string, unknown> to sidestep the FetchFunction.preconnect type
+  // constraint — same pattern as the singleton getAiSdkProvider above.
+  const opts: Record<string, unknown> = {
+    region: resolvedRegion,
+    apiKey: bearerToken,
+  }
+
+  // Zod v4 + AI SDK produces broken JSON schemas for tools — intercept and fix
+  opts.fetch = async (url: string | URL | Request, init?: RequestInit) => {
+    let bodyStr: string | null = null
+    if (typeof init?.body === "string") bodyStr = init.body
+    else if (init?.body instanceof Uint8Array) bodyStr = new TextDecoder().decode(init.body)
+    if (bodyStr) {
+      try {
+        const body = JSON.parse(bodyStr)
+        if (body.toolConfig?.tools) {
+          for (const tool of body.toolConfig.tools) {
+            if (tool.toolSpec) {
+              const cached = _toolSchemaCache.get(tool.toolSpec.name)
+              if (cached) {
+                tool.toolSpec.inputSchema = { json: cached }
+              }
+            }
+          }
+          init = { ...init, body: JSON.stringify(body) }
+        }
+      } catch { /* not JSON, pass through */ }
+    }
+    return globalThis.fetch(url, init!)
+  }
+
+  const aiProvider = createAmazonBedrock(opts)
+
+  logger.debug(
+    { region: resolvedRegion, authMethod: "bearer-token-byok" },
+    "ephemeral bedrock provider created for BYOK request",
+  )
+
+  return {
+    id: "bedrock",
+    name: "AWS Bedrock",
+    getModel(modelId: string): LanguageModel {
+      return aiProvider(resolveModelId(modelId))
+    },
+    getEmbeddingModel(modelId: string): EmbeddingModel {
+      return aiProvider.textEmbeddingModel(modelId)
+    },
+  }
+}
+
 // Backward compat
 export async function getBedrockProvider() { return getAiSdkProvider() }
 export function resolveBedrockModelId(alias: string): string { return resolveModelId(alias) }

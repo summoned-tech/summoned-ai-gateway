@@ -1,0 +1,60 @@
+import type { ModelDefinition } from "./types"
+
+export const OPENAI_MODELS: ModelDefinition[] = [
+  {
+    id: "gpt-4o",
+    name: "GPT-4o",
+    inputPricePer1M: 2.50,
+    outputPricePer1M: 10.00,
+    contextWindow: 128_000,
+    capabilities: ["streaming", "tools", "vision", "json_mode"],
+  },
+  {
+    id: "gpt-4o-mini",
+    name: "GPT-4o mini",
+    inputPricePer1M: 0.15,
+    outputPricePer1M: 0.60,
+    contextWindow: 128_000,
+    capabilities: ["streaming", "tools", "vision", "json_mode"],
+  },
+  {
+    id: "gpt-4-turbo",
+    name: "GPT-4 Turbo",
+    inputPricePer1M: 10.00,
+    outputPricePer1M: 30.00,
+    contextWindow: 128_000,
+    capabilities: ["streaming", "tools", "vision", "json_mode"],
+  },
+  {
+    id: "o1",
+    name: "o1",
+    inputPricePer1M: 15.00,
+    outputPricePer1M: 60.00,
+    contextWindow: 200_000,
+    capabilities: ["tools", "reasoning"],
+  },
+  {
+    id: "o1-mini",
+    name: "o1-mini",
+    inputPricePer1M: 3.00,
+    outputPricePer1M: 12.00,
+    contextWindow: 128_000,
+    capabilities: ["reasoning"],
+  },
+  {
+    id: "o3-mini",
+    name: "o3-mini",
+    inputPricePer1M: 1.10,
+    outputPricePer1M: 4.40,
+    contextWindow: 200_000,
+    capabilities: ["tools", "reasoning"],
+  },
+  {
+    id: "gpt-4o-realtime-preview",
+    name: "GPT-4o Realtime Preview",
+    inputPricePer1M: 5.00,
+    outputPricePer1M: 20.00,
+    contextWindow: 128_000,
+    capabilities: ["streaming"],
+  },
+]

@@ -1,0 +1,122 @@
+/**
+ * Central model registry.
+ *
+ * Every provider file exports a ModelDefinition[].
+ * This file registers them all into a single Map keyed by "provider:modelId".
+ *
+ * Adding a new provider = create a new file + add one register() call here.
+ */
+
+import { env } from "@/lib/env"
+import type { ModelDefinition } from "./types"
+
+import { OPENAI_MODELS } from "./openai"
+import { ANTHROPIC_MODELS } from "./anthropic"
+import { GOOGLE_MODELS } from "./google"
+import { GROQ_MODELS } from "./groq"
+import { BEDROCK_MODELS } from "./bedrock"
+import { AZURE_OPENAI_MODELS } from "./azure-openai"
+import { OLLAMA_MODELS } from "./ollama"
+import { SARVAM_MODELS } from "./sarvam"
+import { YOTTA_MODELS } from "./yotta"
+import { MISTRAL_MODELS } from "./mistral"
+import { TOGETHER_MODELS } from "./together"
+import { DEEPSEEK_MODELS } from "./deepseek"
+import { FIREWORKS_MODELS } from "./fireworks"
+import { COHERE_MODELS } from "./cohere"
+import { CEREBRAS_MODELS } from "./cerebras"
+import { PERPLEXITY_MODELS } from "./perplexity"
+import { XAI_MODELS } from "./xai"
+
+export type { ModelDefinition } from "./types"
+export type { ModelCapability } from "./types"
+
+// ---------------------------------------------------------------------------
+// Internal registry
+// ---------------------------------------------------------------------------
+
+const registry = new Map<string, ModelDefinition>()
+
+function register(providerId: string, models: ModelDefinition[]): void {
+  for (const m of models) {
+    registry.set(`${providerId}:${m.id}`, m)
+  }
+}
+
+register("openai",      OPENAI_MODELS)
+register("anthropic",   ANTHROPIC_MODELS)
+register("google",      GOOGLE_MODELS)
+register("groq",        GROQ_MODELS)
+register("bedrock",     BEDROCK_MODELS)
+register("azure",       AZURE_OPENAI_MODELS)
+register("ollama",      OLLAMA_MODELS)
+register("sarvam",      SARVAM_MODELS)
+register("yotta",       YOTTA_MODELS)
+register("mistral",     MISTRAL_MODELS)
+register("together",    TOGETHER_MODELS)
+register("deepseek",    DEEPSEEK_MODELS)
+register("fireworks",   FIREWORKS_MODELS)
+register("cohere",      COHERE_MODELS)
+register("cerebras",    CEREBRAS_MODELS)
+register("perplexity",  PERPLEXITY_MODELS)
+register("xai",         XAI_MODELS)
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/** Look up a model definition by provider ID + model ID. */
+export function getModel(providerId: string, modelId: string): ModelDefinition | undefined {
+  return registry.get(`${providerId}:${modelId}`)
+}
+
+/** List all known models, optionally filtered by provider. */
+export function listModels(providerId?: string): ModelDefinition[] {
+  if (!providerId) return [...registry.values()]
+  return [...registry.entries()]
+    .filter(([key]) => key.startsWith(`${providerId}:`))
+    .map(([, m]) => m)
+}
+
+/**
+ * Return input cost per 1M tokens for a "provider/model" alias.
+ * Used for cost-based routing — returns Infinity for unknowns so they sort last.
+ */
+export function getInputCostPer1M(alias: string): number {
+  const slash = alias.indexOf("/")
+  if (slash === -1) return Infinity
+  const providerId = alias.slice(0, slash)
+  const modelId = alias.slice(slash + 1)
+  return registry.get(`${providerId}:${modelId}`)?.inputPricePer1M ?? Infinity
+}
+
+// ---------------------------------------------------------------------------
+// Cost calculation
+// ---------------------------------------------------------------------------
+
+export interface CostResult {
+  costUsd: number
+  costInr: number
+  inputCostUsd: number
+  outputCostUsd: number
+}
+
+export function calculateCost(
+  providerId: string,
+  modelId: string,
+  inputTokens: number,
+  outputTokens: number,
+): CostResult {
+  const model = registry.get(`${providerId}:${modelId}`)
+
+  if (!model || (!model.inputPricePer1M && !model.outputPricePer1M)) {
+    return { costUsd: 0, costInr: 0, inputCostUsd: 0, outputCostUsd: 0 }
+  }
+
+  const inputCostUsd  = (inputTokens  / 1_000_000) * model.inputPricePer1M
+  const outputCostUsd = (outputTokens / 1_000_000) * model.outputPricePer1M
+  const costUsd       = inputCostUsd + outputCostUsd
+  const costInr       = costUsd * env.USD_INR_RATE
+
+  return { costUsd, costInr, inputCostUsd, outputCostUsd }
+}

@@ -66,6 +66,16 @@ export const authMiddleware = createMiddleware<{ Variables: AuthContext }>(async
     )
   }
 
+  // Managed key mode requires Postgres. Without it, only BYOK / no-auth works.
+  if (!env.POSTGRES_URL) {
+    return c.json({
+      error: {
+        code: "DB_REQUIRED",
+        message: "Managed API keys require POSTGRES_URL. Use x-provider-key header for BYOK mode, or set GATEWAY_REQUIRE_AUTH=false for open access.",
+      },
+    }, 503)
+  }
+
   const rawKey = authHeader.slice(7)
   const hash = await hashKey(rawKey)
 

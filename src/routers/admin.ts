@@ -27,7 +27,8 @@ admin.get("/logs", async (c: any) => {
   const limit = Math.min(Number(c.req.query("limit") ?? 100), 500)
   const source = c.req.query("source") ?? "buffer"
 
-  if (source === "buffer") {
+  // In-memory buffer always works — no DB required
+  if (source === "buffer" || !process.env.POSTGRES_URL) {
     return c.json({ data: getRecentLogs(limit), source: "buffer", total: getLogCount() })
   }
 
@@ -57,6 +58,15 @@ admin.get("/logs", async (c: any) => {
 // ---------------------------------------------------------------------------
 
 admin.get("/stats", async (c: any) => {
+  if (!process.env.POSTGRES_URL) {
+    return c.json({
+      stateless: true,
+      message: "Stats require POSTGRES_URL. Live logs available at /admin/logs.",
+      liveLogCount: getLogCount(),
+      providers: registry.allIds(),
+    })
+  }
+
   const period = c.req.query("period") ?? "24h"
   const hours = period === "7d" ? 168 : period === "30d" ? 720 : 24
   const since = new Date(Date.now() - hours * 60 * 60 * 1000)

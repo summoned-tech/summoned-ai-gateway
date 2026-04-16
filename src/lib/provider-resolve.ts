@@ -113,8 +113,60 @@ export async function createEphemeralProvider(
       const { createYottaProvider } = await import("@/providers/yotta")
       return createYottaProvider(apiKey)
     }
-    default:
+    case "mistral": {
+      const { createMistralProvider } = await import("@/providers/mistral")
+      return createMistralProvider(apiKey)
+    }
+    case "together": {
+      const { createTogetherProvider } = await import("@/providers/together")
+      return createTogetherProvider(apiKey)
+    }
+    case "deepseek": {
+      const { createDeepSeekProvider } = await import("@/providers/deepseek")
+      return createDeepSeekProvider(apiKey)
+    }
+    case "fireworks": {
+      const { createFireworksProvider } = await import("@/providers/fireworks")
+      return createFireworksProvider(apiKey)
+    }
+    case "cohere": {
+      const { createCohereProvider } = await import("@/providers/cohere")
+      return createCohereProvider(apiKey)
+    }
+    case "cerebras": {
+      const { createCerebrasProvider } = await import("@/providers/cerebras")
+      return createCerebrasProvider(apiKey)
+    }
+    case "perplexity": {
+      const { createPerplexityProvider } = await import("@/providers/perplexity")
+      return createPerplexityProvider(apiKey)
+    }
+    case "xai": {
+      const { createXAIProvider } = await import("@/providers/xai")
+      return createXAIProvider(apiKey)
+    }
+    case "bedrock": {
+      // x-provider-key format: "[region|]bearer-token"
+      // e.g. "us-east-1|your-bedrock-api-key"  OR  "your-bedrock-api-key"
+      let region: string | undefined
+      let bearerToken = apiKey
+      const pipeIdx = apiKey.indexOf("|")
+      if (pipeIdx !== -1) {
+        region = apiKey.slice(0, pipeIdx)
+        bearerToken = apiKey.slice(pipeIdx + 1)
+      }
+      const { createBedrockByokProvider } = await import("@/providers/bedrock")
+      return createBedrockByokProvider(bearerToken, region)
+    }
+    default: {
+      // Try to find in registry (handles custom providers registered at startup)
+      const registered = registry.get(providerId)
+      if (registered) {
+        logger.debug({ providerId }, "ephemeral provider resolved from registry")
+        return registered
+      }
       logger.warn({ providerId }, "unknown provider for ephemeral creation")
       return null
+    }
   }
 }

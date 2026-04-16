@@ -10,6 +10,18 @@ import { logger } from "@/lib/telemetry"
 
 export const virtualKeysRouter = new Hono()
 
+virtualKeysRouter.use("*", async (c: any, next: any) => {
+  if (!process.env.POSTGRES_URL) {
+    return c.json({
+      error: {
+        code: "DB_REQUIRED",
+        message: "Virtual key management requires POSTGRES_URL. Running in stateless mode.",
+      },
+    }, 503)
+  }
+  return next()
+})
+
 function requireAdmin() {
   return async (c: any, next: any) => {
     if (c.get("consoleAuth")) return next()

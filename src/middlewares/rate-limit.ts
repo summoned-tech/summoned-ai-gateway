@@ -1,5 +1,5 @@
 import { createMiddleware } from "hono/factory"
-import { redis } from "@/lib/redis"
+import { redis, isRedisEnabled } from "@/lib/redis"
 import { rateLimitHits } from "@/lib/telemetry"
 import { getDailyTokensUsed } from "@/lib/budget"
 import type { AuthContext } from "@/middlewares/auth"
@@ -9,8 +9,22 @@ import type { AuthContext } from "@/middlewares/auth"
  *   1. Sliding-window RPM — per API key (or per source IP for BYOK/anonymous callers)
  *   2. Daily token budget (TPD) — per API key, enforced before the request is forwarded
  *
- * Both limits live in Redis; neither adds a DB round-trip.
+ * When Redis is not configured, rate limiting is per-instance in-memory only.
  */
+
+// In-memory sliding window used when Redis is not available
+const memWindows = new Map<string, number[]>()
+
+function checkRpmInMemory(key: string, windowMs: number): number {
+  const now = Date.now()
+  const cutoff = now - windowMs
+  const prev = (memWindows.get(key) ?? []).filter(t => t > cutoff)
+  prev.push(now)
+  memWindows.set(key, prev)
+  if (memWindows.size > 20_000) memWindows.delete(memWindows.keys().next().value!)
+  return prev.length
+}
+
 export const rateLimitMiddleware = createMiddleware<{ Variables: AuthContext }>(async (c, next) => {
   const apiKeyId = c.get("apiKeyId")
   const tenantId = c.get("tenantId")
@@ -31,16 +45,20 @@ export const rateLimitMiddleware = createMiddleware<{ Variables: AuthContext }>(
   const rpmKey = isPublic ? `rl:ip:${sourceIp}` : `rl:rpm:${apiKeyId}`
 
   // ---------------------------------------------------------------------------
-  // Layer 1 — RPM sliding window
+  // Layer 1 — RPM sliding window (Redis when available, in-memory fallback)
   // ---------------------------------------------------------------------------
-  const pipe = redis.pipeline()
-  pipe.zremrangebyscore(rpmKey, 0, now - windowMs)
-  pipe.zadd(rpmKey, now, `${now}-${Math.random()}`)
-  pipe.zcard(rpmKey)
-  pipe.pexpire(rpmKey, windowMs)
-
-  const results = await pipe.exec()
-  const count = results?.[2]?.[1] as number ?? 0
+  let count: number
+  if (isRedisEnabled) {
+    const pipe = (redis as any).pipeline()
+    pipe.zremrangebyscore(rpmKey, 0, now - windowMs)
+    pipe.zadd(rpmKey, now, `${now}-${Math.random()}`)
+    pipe.zcard(rpmKey)
+    pipe.pexpire(rpmKey, windowMs)
+    const results = await pipe.exec()
+    count = results?.[2]?.[1] as number ?? 0
+  } else {
+    count = checkRpmInMemory(rpmKey, windowMs)
+  }
 
   if (count > rpm) {
     rateLimitHits.inc({ tenant_id: tenantId })

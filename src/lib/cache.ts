@@ -1,8 +1,11 @@
-import { redis } from "@/lib/redis"
+import { redis, isRedisEnabled } from "@/lib/redis"
 import { logger } from "@/lib/telemetry"
 
 const CACHE_PREFIX = "cache:completion:"
 const DEFAULT_TTL_SECONDS = 3600
+
+// In-memory cache fallback: stores {value, expiresAt}
+const memCache = new Map<string, { value: unknown; expiresAt: number }>()
 
 /**
  * Simple response cache for non-streaming completions.
@@ -21,6 +24,12 @@ export async function getCacheKey(parts: Record<string, unknown>): Promise<strin
 }
 
 export async function getCachedResponse(key: string): Promise<unknown | null> {
+  if (!isRedisEnabled) {
+    const entry = memCache.get(key)
+    if (!entry) return null
+    if (Date.now() > entry.expiresAt) { memCache.delete(key); return null }
+    return entry.value
+  }
   try {
     const raw = await redis.get(key)
     if (!raw) return null
@@ -36,6 +45,11 @@ export async function setCachedResponse(
   response: unknown,
   ttlSeconds = DEFAULT_TTL_SECONDS,
 ): Promise<void> {
+  if (!isRedisEnabled) {
+    memCache.set(key, { value: response, expiresAt: Date.now() + ttlSeconds * 1000 })
+    if (memCache.size > 500) memCache.delete(memCache.keys().next().value!)
+    return
+  }
   try {
     await redis.setex(key, ttlSeconds, JSON.stringify(response))
   } catch (err) {

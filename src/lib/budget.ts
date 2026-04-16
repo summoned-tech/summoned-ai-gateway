@@ -1,5 +1,8 @@
-import { redis } from "@/lib/redis"
+import { redis, isRedisEnabled } from "@/lib/redis"
 import { logger } from "@/lib/telemetry"
+
+// In-memory fallback counters keyed by "apiKeyId:YYYY-MM-DD"
+const memBudget = new Map<string, number>()
 
 /**
  * Daily token budget tracker.
@@ -20,6 +23,7 @@ function todayKey(apiKeyId: string): string {
 
 /** How many tokens this key has consumed today. */
 export async function getDailyTokensUsed(apiKeyId: string): Promise<number> {
+  if (!isRedisEnabled) return memBudget.get(todayKey(apiKeyId)) ?? 0
   try {
     const val = await redis.get(todayKey(apiKeyId))
     return Number(val ?? 0)
@@ -34,14 +38,18 @@ export async function getDailyTokensUsed(apiKeyId: string): Promise<number> {
  * Runs asynchronously — never awaited on the critical path.
  */
 export function incrementDailyTokens(apiKeyId: string, tokens: number): void {
-  // BYOK / anonymous callers have no managed budget to track
   if (!tokens || apiKeyId === "byok" || apiKeyId === "anonymous") return
 
   const key = todayKey(apiKeyId)
+  if (!isRedisEnabled) {
+    memBudget.set(key, (memBudget.get(key) ?? 0) + tokens)
+    return
+  }
+
   redis
     .pipeline()
     .incrby(key, tokens)
     .expire(key, 48 * 60 * 60)
     .exec()
-    .catch((err) => logger.warn({ err, apiKeyId }, "failed to increment daily token usage"))
+    .catch((err: unknown) => logger.warn({ err, apiKeyId }, "failed to increment daily token usage"))
 }

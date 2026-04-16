@@ -2,13 +2,22 @@ import type { ModelDefinition } from "./types"
 
 export const SARVAM_MODELS: ModelDefinition[] = [
   {
-    id: "sarvam-2b-v0.5",
-    name: "Sarvam 2B",
+    id: "sarvam-105b",
+    name: "Sarvam 105B",
     inputPricePer1M: 0,
     outputPricePer1M: 0,
-    contextWindow: 4_096,
-    capabilities: ["streaming"],
-    description: "India-first multilingual model supporting 10 Indian languages",
+    contextWindow: 131_072,
+    capabilities: ["streaming", "tools"],
+    description: "Flagship model — complex reasoning, coding, and 10+ Indian languages",
+  },
+  {
+    id: "sarvam-30b",
+    name: "Sarvam 30B",
+    inputPricePer1M: 0,
+    outputPricePer1M: 0,
+    contextWindow: 65_536,
+    capabilities: ["streaming", "tools"],
+    description: "Balanced performance for standard conversations and Q&A in Indic languages",
   },
   {
     id: "sarvam-m",

@@ -26,7 +26,9 @@ export function createOpenAICompatProvider(opts: {
     id: opts.id,
     name: opts.name,
     getModel(modelId: string): LanguageModel {
-      return sdk(modelId)
+      // Use .chat() to force /v1/chat/completions — the default sdk(modelId)
+      // callable now routes to /v1/responses which third-party providers don't support.
+      return sdk.chat(modelId)
     },
     getEmbeddingModel(modelId: string): EmbeddingModel {
       return sdk.textEmbeddingModel(modelId)

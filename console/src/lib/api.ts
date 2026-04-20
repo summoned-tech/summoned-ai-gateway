@@ -1,14 +1,23 @@
+import { getAdminKey, reportAuthError } from "./adminKey"
+
 const BASE = import.meta.env.DEV ? "http://localhost:4200" : ""
 const API = `${BASE}/console/api`
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const adminKey = getAdminKey()
   const headers: Record<string, string> = { "Content-Type": "application/json" }
+  if (adminKey) headers["x-admin-key"] = adminKey
 
   const res = await fetch(`${API}${path}`, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
   })
+
+  if (res.status === 401) {
+    reportAuthError()
+    throw new Error("Admin key required")
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: { message: res.statusText } }))

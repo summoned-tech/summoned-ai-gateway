@@ -8,12 +8,14 @@ import { logger, getTracer, spanError, SpanStatusCode, completionRequestCounter,
 import { registry } from "@/providers/registry"
 import { _toolSchemaCache } from "@/providers/bedrock"
 import { tryWithFallback, isRetryableError } from "@/lib/fallback"
-import { parseConfig, type SummonedConfig } from "@/lib/config"
+import { parseConfig } from "@/lib/config"
+import { env } from "@/lib/env"
 import { calculateCost } from "@/lib/pricing"
 import { pushLog } from "@/lib/log-buffer"
 import { getCacheKey, getCachedResponse, setCachedResponse } from "@/lib/cache"
 import { runGuardrails } from "@/lib/guardrails"
 import { resolveVirtualKey, createEphemeralProvider } from "@/lib/provider-resolve"
+import type { ProviderAdapter } from "@/providers/base"
 import { isProviderAvailable, recordSuccess, recordFailure } from "@/lib/circuit-breaker"
 import { incrementDailyTokens } from "@/lib/budget"
 import { sortByCost, sortByLatency, recordProviderLatency } from "@/lib/routing"
@@ -50,8 +52,12 @@ const completionRequestSchema = z.object({
   max_tokens: z.number().int().positive().optional(),
   tools: z.array(toolSchema).optional(),
   tool_choice: z.any().optional(),
-  top_p: z.number().optional(),
+  top_p: z.number().min(0).max(1).optional(),
   stop: z.union([z.string(), z.array(z.string())]).optional(),
+  presence_penalty: z.number().min(-2).max(2).optional(),
+  frequency_penalty: z.number().min(-2).max(2).optional(),
+  seed: z.number().int().optional(),
+  response_format: z.object({ type: z.enum(["text", "json_object"]) }).optional(),
   fallback_models: z.array(z.string()).max(5).optional(),
   config: z.any().optional(),
 }).passthrough()
@@ -154,7 +160,24 @@ export { _toolSchemaCache }
 // Model resolution — handles both managed registry and BYOK ephemeral providers
 // ---------------------------------------------------------------------------
 
-async function resolveModelForAlias(alias: string, byokKey: string | null) {
+async function resolveModelForAlias(
+  alias: string,
+  byokKey: string | null,
+  vkAdapter: { provider: ProviderAdapter; providerId: string } | null = null,
+) {
+  // Virtual-key path — credentials decrypted from DB. Model prefix is optional;
+  // if present and non-matching, we still honour the explicit provider from the slug.
+  if (vkAdapter) {
+    const slashIdx = alias.indexOf("/")
+    const hintedProvider = slashIdx !== -1 ? alias.slice(0, slashIdx) : null
+    const modelId = slashIdx !== -1 ? alias.slice(slashIdx + 1) : alias
+
+    if (!hintedProvider || hintedProvider === vkAdapter.providerId) {
+      return { model: vkAdapter.provider.getModel(modelId), provider: vkAdapter.provider, modelId }
+    }
+    // Mismatched provider hint: fall through to registry/byok resolution for that model.
+  }
+
   if (!byokKey) {
     return registry.getModel(alias)
   }
@@ -254,6 +277,25 @@ completionsRouter.post("/chat/completions", async (c: any) => {
   // BYOK: caller supplies their own provider API key via x-provider-key header
   const byokKey = c.req.header("x-provider-key") ?? null
 
+  // Virtual key — resolve once and reuse for every model in the fallback chain.
+  // Requires Postgres; silently ignored in stateless mode.
+  let vkAdapter: { provider: ProviderAdapter; providerId: string } | null = null
+  if (config?.virtualKey && env.POSTGRES_URL) {
+    try {
+      vkAdapter = await resolveVirtualKey(config.virtualKey, tenantId)
+    } catch (err) {
+      logger.warn({ err, virtualKey: config.virtualKey }, "virtual key lookup failed")
+    }
+    if (!vkAdapter) {
+      return c.json({
+        error: {
+          code: "VIRTUAL_KEY_NOT_FOUND",
+          message: `Virtual key "${config.virtualKey}" not found or inactive for tenant "${tenantId}".`,
+        },
+      }, 404)
+    }
+  }
+
   // Build the model chain: primary + config fallbacks + body fallbacks,
   // then remove providers whose circuit breaker is currently OPEN (unless BYOK).
   const configFallbacks = config?.fallback ?? []
@@ -349,6 +391,12 @@ completionsRouter.post("/chat/completions", async (c: any) => {
       ...(tools ? { tools } : {}),
       ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       ...(req.max_tokens ? { maxTokens: req.max_tokens } : {}),
+      ...(req.top_p !== undefined ? { topP: req.top_p } : {}),
+      ...(req.stop ? { stopSequences: Array.isArray(req.stop) ? req.stop : [req.stop] } : {}),
+      ...(req.presence_penalty !== undefined ? { presencePenalty: req.presence_penalty } : {}),
+      ...(req.frequency_penalty !== undefined ? { frequencyPenalty: req.frequency_penalty } : {}),
+      ...(req.seed !== undefined ? { seed: req.seed } : {}),
+      ...(req.response_format?.type === "json_object" ? { responseFormat: { type: "json" as const } } : {}),
     }
 
     // Apply timeout if configured
@@ -367,14 +415,21 @@ completionsRouter.post("/chat/completions", async (c: any) => {
         const { result, modelAlias, attemptIndex, totalRetries, fallbackAttempts } = await tryWithFallback(
           modelChain,
           async (alias) => {
-            const { model, provider, modelId } = await resolveModelForAlias(alias, byokKey)
-            const r = await generateText({
-              ...baseOptions,
-              model,
-              ...(abortController ? { abortSignal: abortController.signal } : {}),
-            })
-            recordSuccess(provider.id)
-            return { r, provider, modelId }
+            const { model, provider, modelId } = await resolveModelForAlias(alias, byokKey, vkAdapter)
+            try {
+              const r = await generateText({
+                ...baseOptions,
+                model,
+                ...(abortController ? { abortSignal: abortController.signal } : {}),
+              })
+              recordSuccess(provider.id)
+              return { r, provider, modelId }
+            } catch (err) {
+              // Attribute failure to the actual provider that errored, not just
+              // the first in the chain. Circuit breaker then opens accurately.
+              recordFailure(provider.id)
+              throw err
+            }
           },
           config,
         )
@@ -487,16 +542,18 @@ completionsRouter.post("/chat/completions", async (c: any) => {
         })
       } catch (err) {
         if (timeoutHandle) clearTimeout(timeoutHandle)
-        recordFailure(modelChain[0]?.split("/")[0] ?? "unknown")
+        // Per-attempt failures are already recorded inside the fn wrapper above —
+        // don't double-count here.
         spanError(span, err)
         span.end()
         const latencyMs = Date.now() - startTime
 
-        completionRequestCounter.inc({ provider: "unknown", model: req.model, status: "error" })
+        const lastProvider = modelChain[modelChain.length - 1]?.split("/")[0] ?? "unknown"
+        completionRequestCounter.inc({ provider: lastProvider, model: req.model, status: "error" })
 
         emitLog({
           id: logId, apiKeyId, tenantId, userId, organizationId,
-          requestedModel: req.model, resolvedModel: req.model, provider: "unknown",
+          requestedModel: req.model, resolvedModel: req.model, provider: lastProvider,
           latencyMs, streaming: false, status: "error",
           errorMessage: err instanceof Error ? err.message : String(err),
         })
@@ -538,7 +595,7 @@ completionsRouter.post("/chat/completions", async (c: any) => {
       const isLast = i === modelChain.length - 1
 
       try {
-        const { model, provider, modelId } = await resolveModelForAlias(alias, byokKey)
+        const { model, provider, modelId } = await resolveModelForAlias(alias, byokKey, vkAdapter)
         const stream = streamText({
           ...baseOptions,
           model,
@@ -615,15 +672,20 @@ completionsRouter.post("/chat/completions", async (c: any) => {
         const error = err instanceof Error ? err.message : String(err)
         streamingFallbackAttempts.push({ model: alias, error })
 
+        // Attribute failure to the provider parsed from the alias (we may not
+        // have resolved the adapter yet if the error was in resolveModelForAlias).
+        const failedProviderId = alias.includes("/") ? alias.split("/")[0] : "unknown"
+        recordFailure(failedProviderId)
+
         if (isLast || !isRetryableError(err)) {
           if (timeoutHandle) clearTimeout(timeoutHandle)
           activeCompletions.dec()
-          completionRequestCounter.inc({ provider: "unknown", model: req.model, status: "error" })
+          completionRequestCounter.inc({ provider: failedProviderId, model: req.model, status: "error" })
 
           emitLog({
             id: logId, apiKeyId, tenantId, userId, organizationId,
             requestedModel: req.model, resolvedModel: req.model,
-            provider: "unknown", latencyMs: Date.now() - startTime,
+            provider: failedProviderId, latencyMs: Date.now() - startTime,
             streaming: true, status: "error", errorMessage: error,
           })
 
@@ -685,6 +747,9 @@ completionsRouter.post("/chat/completions", async (c: any) => {
 
           if (timeoutHandle) clearTimeout(timeoutHandle)
 
+          // Mark provider healthy — only reaches here on clean stream completion.
+          recordSuccess(providerId)
+
           const latencyMs = Date.now() - startTime
           const cost = calculateCost(providerId, modelId, inputTokens, outputTokens)
 
@@ -717,9 +782,14 @@ completionsRouter.post("/chat/completions", async (c: any) => {
           })
         } catch (err) {
           if (timeoutHandle) clearTimeout(timeoutHandle)
+          recordFailure(providerId)
           spanError(span, err)
+          // Emit final content chunk with finish_reason, error payload, and [DONE]
+          // so OpenAI-style SSE consumers (which terminate on [DONE]) don't hang.
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ ...baseChunk, choices: [{ index: 0, delta: {}, finish_reason: "error" }] })}\n\n`))
           const errChunk = JSON.stringify({ error: { code: "UPSTREAM_ERROR", message: "Stream interrupted" } })
           controller.enqueue(encoder.encode(`data: ${errChunk}\n\n`))
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"))
           controller.close()
 
           emitLog({

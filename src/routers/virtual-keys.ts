@@ -7,6 +7,7 @@ import { db, virtualKey } from "@/lib/db"
 import { encrypt, timingSafeEqual } from "@/lib/crypto"
 import { env } from "@/lib/env"
 import { logger } from "@/lib/telemetry"
+import { redis } from "@/lib/redis"
 
 export const virtualKeysRouter = new Hono()
 
@@ -24,7 +25,6 @@ virtualKeysRouter.use("*", async (c: any, next: any) => {
 
 function requireAdmin() {
   return async (c: any, next: any) => {
-    if (c.get("consoleAuth")) return next()
     const key = c.req.header("x-admin-key") ?? ""
     if (!timingSafeEqual(key, env.ADMIN_API_KEY)) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid admin key" } }, 401)
@@ -108,6 +108,9 @@ virtualKeysRouter.delete("/:id", requireAdmin(), async (c) => {
     .returning({ id: virtualKey.id })
 
   if (!rows.length) return c.json({ error: { code: "NOT_FOUND", message: "Virtual key not found" } }, 404)
+
+  // Invalidate cached record so revocation takes effect immediately
+  await redis.del(`vk:${id}`)
 
   logger.info({ id }, "virtual key revoked")
   return c.json({ id, revoked: true })

@@ -1,17 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from "react"
 import type { LogEntry } from "./api"
+import { getAdminKey, reportAuthError } from "./adminKey"
+
+// Re-export for callers that imported `setAdminKey` from this module historically.
+export { setAdminKey } from "./adminKey"
 
 const MAX_LOGS = 500
-
-// Console is served from the gateway itself — use localStorage to persist the
-// admin key across page refreshes so users don't have to re-enter it.
-function getAdminKey(): string {
-  return localStorage.getItem("summoned_admin_key") ?? ""
-}
-
-export function setAdminKey(key: string): void {
-  localStorage.setItem("summoned_admin_key", key)
-}
 
 export function useLogStream() {
   const [logs, setLogs] = useState<LogEntry[]>([] as LogEntry[])
@@ -46,6 +40,7 @@ export function useLogStream() {
       // Code 1008 = policy violation (server rejected auth) — don't reconnect
       if (ev.code === 1008 || ev.reason?.includes("UNAUTHORIZED")) {
         setAuthError(true)
+        reportAuthError()
         return
       }
       reconnectTimer.current = setTimeout(connect, 3000)

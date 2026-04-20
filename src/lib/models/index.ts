@@ -27,6 +27,14 @@ import { COHERE_MODELS } from "./cohere"
 import { CEREBRAS_MODELS } from "./cerebras"
 import { PERPLEXITY_MODELS } from "./perplexity"
 import { XAI_MODELS } from "./xai"
+import { DEEPINFRA_MODELS } from "./deepinfra"
+import { HYPERBOLIC_MODELS } from "./hyperbolic"
+import { SAMBANOVA_MODELS } from "./sambanova"
+import { NOVITA_MODELS } from "./novita"
+import { MOONSHOT_MODELS } from "./moonshot"
+import { ZAI_MODELS } from "./zai"
+import { NVIDIA_MODELS } from "./nvidia"
+import { VOYAGE_MODELS } from "./voyage"
 
 export type { ModelDefinition } from "./types"
 export type { ModelCapability } from "./types"
@@ -60,6 +68,14 @@ register("cohere",      COHERE_MODELS)
 register("cerebras",    CEREBRAS_MODELS)
 register("perplexity",  PERPLEXITY_MODELS)
 register("xai",         XAI_MODELS)
+register("deepinfra",   DEEPINFRA_MODELS)
+register("hyperbolic",  HYPERBOLIC_MODELS)
+register("sambanova",   SAMBANOVA_MODELS)
+register("novita",      NOVITA_MODELS)
+register("moonshot",    MOONSHOT_MODELS)
+register("zai",         ZAI_MODELS)
+register("nvidia",      NVIDIA_MODELS)
+register("voyage",      VOYAGE_MODELS)
 
 // ---------------------------------------------------------------------------
 // Public API

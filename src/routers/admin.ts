@@ -11,7 +11,6 @@ import { env } from "@/lib/env"
 const admin = new Hono()
 
 admin.use("*", async (c: any, next: any) => {
-  if (c.get("consoleAuth")) return next()
   const key = c.req.header("x-admin-key") ?? ""
   if (!timingSafeEqual(key, env.ADMIN_API_KEY)) {
     return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid admin key" } }, 401)

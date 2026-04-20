@@ -145,6 +145,55 @@ export async function createEphemeralProvider(
       const { createXAIProvider } = await import("@/providers/xai")
       return createXAIProvider(apiKey)
     }
+    case "openrouter": {
+      const { createOpenRouterProvider } = await import("@/providers/openrouter")
+      return createOpenRouterProvider(apiKey)
+    }
+    case "huggingface": {
+      const { createHuggingFaceProvider } = await import("@/providers/huggingface")
+      return createHuggingFaceProvider(apiKey)
+    }
+    case "deepinfra": {
+      const { createDeepInfraProvider } = await import("@/providers/deepinfra")
+      return createDeepInfraProvider(apiKey)
+    }
+    case "hyperbolic": {
+      const { createHyperbolicProvider } = await import("@/providers/hyperbolic")
+      return createHyperbolicProvider(apiKey)
+    }
+    case "sambanova": {
+      const { createSambaNovaProvider } = await import("@/providers/sambanova")
+      return createSambaNovaProvider(apiKey)
+    }
+    case "novita": {
+      const { createNovitaProvider } = await import("@/providers/novita")
+      return createNovitaProvider(apiKey)
+    }
+    case "moonshot": {
+      const { createMoonshotProvider } = await import("@/providers/moonshot")
+      return createMoonshotProvider(apiKey)
+    }
+    case "zai": {
+      const { createZAIProvider } = await import("@/providers/zai")
+      return createZAIProvider(apiKey)
+    }
+    case "nvidia": {
+      const { createNvidiaNimProvider } = await import("@/providers/nvidia-nim")
+      return createNvidiaNimProvider(apiKey)
+    }
+    case "vllm": {
+      // BYOK format: "baseUrl|apiKey"  OR just "baseUrl" (auth optional for vLLM).
+      const pipeIdx = apiKey.indexOf("|")
+      const baseUrl = pipeIdx !== -1 ? apiKey.slice(0, pipeIdx) : apiKey
+      const key = pipeIdx !== -1 ? apiKey.slice(pipeIdx + 1) : ""
+      if (!baseUrl) return null
+      const { createVLLMProvider } = await import("@/providers/vllm")
+      return createVLLMProvider(baseUrl, key)
+    }
+    case "voyage": {
+      const { createVoyageProvider } = await import("@/providers/voyage")
+      return createVoyageProvider(apiKey)
+    }
     case "bedrock": {
       // x-provider-key format: "[region|]bearer-token"
       // e.g. "us-east-1|your-bedrock-api-key"  OR  "your-bedrock-api-key"

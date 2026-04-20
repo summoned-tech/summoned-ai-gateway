@@ -28,12 +28,19 @@ ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/drizzle ./drizzle
+COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
+COPY --from=builder /app/package.json ./package.json
 COPY --from=console-builder /app/console/../public/console ./public/console
+COPY entrypoint.sh ./entrypoint.sh
 
 # Non-root user
-RUN addgroup --system --gid 1001 gateway && \
-    adduser --system --uid 1001 gateway
+RUN chmod +x ./entrypoint.sh && \
+    addgroup --system --gid 1001 gateway && \
+    adduser --system --uid 1001 gateway && \
+    chown -R gateway:gateway /app
 USER gateway
 
 EXPOSE 4000
-CMD ["bun", "dist/index.mjs"]
+# entrypoint.sh runs `bun run db:migrate` then boots the gateway.
+# Migrations are idempotent — safe to run on every container start.
+CMD ["./entrypoint.sh"]

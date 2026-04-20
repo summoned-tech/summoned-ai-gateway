@@ -5,9 +5,20 @@ initTracing()
 
 import { Hono } from "hono"
 import { cors } from "hono/cors"
-import { serveStatic } from "hono/bun"
+
+import { fileURLToPath } from "node:url"
+import { dirname, join } from "node:path"
 
 import { env } from "@/lib/env"
+import { getServeStatic } from "@/runtime/static"
+import { startServer } from "@/runtime/server"
+
+// Make `./public` resolve correctly regardless of where the user launched
+// the gateway (npx from another dir, Docker WORKDIR, global npm bin, etc.).
+// When run from source:      __dirname = .../src   → package root = parent of src
+// When run from bundle:      __dirname = .../dist  → package root = parent of dist
+const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..")
+process.chdir(PACKAGE_ROOT)
 import { redis, isRedisEnabled } from "@/lib/redis"
 import { errorHandler } from "@/lib/error"
 import { requestIdMiddleware } from "@/middlewares/request-id"
@@ -32,26 +43,40 @@ import { subscribe, getRecentLogs } from "@/lib/log-buffer"
 
 let ready = false
 
+// Resolve the runtime-correct static-file middleware (hono/bun on Bun,
+// @hono/node-server/serve-static on Node). Top-level await is fine in ESM on
+// both runtimes (Bun 1.x, Node 18+).
+const serveStatic = await getServeStatic()
+
 const app = new Hono()
-  .use("*", cors())
   .use("*", requestIdMiddleware)
   .use("*", securityHeadersMiddleware)
   .use("*", bodySizeLimitMiddleware)
   .use("*", telemetryMiddleware)
   .onError(errorHandler)
 
-// Console SPA — served from /console (built from console/ directory)
+// CORS — permissive for the public API (customers call /v1 from any origin)
+// and strictly SAME-ORIGIN for admin surfaces. Not applying CORS on
+// /console/api, /admin, /ws/logs means browsers block cross-origin reads,
+// which kills the CSRF attack surface for the admin API.
+app.use("/v1/*", cors())
+app.use("/health", cors())
+app.use("/health/*", cors())
+
+// Console SPA — served from /console. `./public` resolves against the
+// package root (we chdir'd there above) so it works uniformly on both
+// runtimes and regardless of where the user launched the gateway.
 app.use("/console/assets/*", serveStatic({ root: "./public" }))
 app.use("/console/index.html", serveStatic({ root: "./public" }))
 app.get("/console", (c: any) => c.redirect("/console/"))
 app.get("/console/", serveStatic({ path: "./public/console/index.html" }))
 
-// Console API — auto-authenticated (the console is served from the gateway itself)
+// Console API — same surface as /admin, protected by the same ADMIN_API_KEY.
+// The SPA reads the key from localStorage and sends it as x-admin-key on every
+// call. There's no implicit "authenticated because you reached /console" —
+// that was a wide-open admin panel when the gateway is exposed publicly.
 const consoleApi = new Hono()
-  .use("*", async (c: any, next: any) => {
-    c.set("consoleAuth", true)
-    return next()
-  })
+consoleApi.use("*", adminRateLimitMiddleware)
 consoleApi.route("/", adminRouter)
 consoleApi.route("/virtual-keys", virtualKeysRouter)
 consoleApi.route("/keys", keysRouter)
@@ -88,40 +113,19 @@ app.use("/admin/*", adminRateLimitMiddleware)
 app.route("/admin", adminRouter)
 app.route("/admin/virtual-keys", virtualKeysRouter)
 
-// WebSocket endpoint for real-time log streaming — admin-only
-app.get("/ws/logs", (c: any) => {
-  const upgrade = c.req.header("upgrade")
-  if (upgrade?.toLowerCase() !== "websocket") {
-    return c.json({ error: "Expected WebSocket upgrade" }, 426)
-  }
-
-  // Require admin key via query param (headers cannot be set by the browser WS API)
-  // The console is served from the same origin so it passes the key as ?key=...
-  const adminKey = c.req.query("key")
-  if (!adminKey || !timingSafeEqual(adminKey, env.ADMIN_API_KEY)) {
-    return c.json({ error: { code: "UNAUTHORIZED", message: "Valid admin key required" } }, 401)
-  }
-
-  // Bun exposes the server as the second arg to fetch(); Hono stores it as c.env.
-  // We also keep a globalThis reference set by Bun.serve() in main().
-  const server = (globalThis as any).__bunServer ?? (c.env as any)
-  if (server?.upgrade) {
-    const success = server.upgrade(c.req.raw)
-    // When upgrade succeeds Bun takes ownership of the socket and ignores any
-    // HTTP response we return — so we return an empty 200 to satisfy Hono.
-    if (success) return new Response()
-  }
-
-  return c.json({ error: "WebSocket upgrade failed" }, 500)
-})
+// WebSocket `/ws/logs` is wired through the runtime adapter at boot
+// (see `startServer` call below) — not as a Hono GET handler here,
+// because the upgrade mechanism differs between Bun and Node.
 
 export type AppType = typeof app
 
 // ---------------------------------------------------------------------------
-// WebSocket clients — stored module-level so handler and subscriber share state
+// WebSocket clients — runtime-agnostic. startServer() calls onWsOpen/Close
+// callbacks below, which keep this set in sync.
 // ---------------------------------------------------------------------------
 
-const wsClients = new Set<any>()
+type WsLike = { send(data: string): void }
+const wsClients = new Set<WsLike>()
 
 // ---------------------------------------------------------------------------
 // Provider registration — enable providers based on available env vars
@@ -259,6 +263,83 @@ async function registerProviders() {
     registered.push("xai")
   }
 
+  // OpenRouter — meta-provider aggregator
+  if (env.OPENROUTER_API_KEY) {
+    const { createOpenRouterProvider } = await import("@/providers/openrouter")
+    registry.register(createOpenRouterProvider(env.OPENROUTER_API_KEY))
+    registered.push("openrouter")
+  }
+
+  // HuggingFace
+  if (env.HUGGINGFACE_API_KEY) {
+    const { createHuggingFaceProvider } = await import("@/providers/huggingface")
+    registry.register(createHuggingFaceProvider(env.HUGGINGFACE_API_KEY))
+    registered.push("huggingface")
+  }
+
+  // DeepInfra
+  if (env.DEEPINFRA_API_KEY) {
+    const { createDeepInfraProvider } = await import("@/providers/deepinfra")
+    registry.register(createDeepInfraProvider(env.DEEPINFRA_API_KEY))
+    registered.push("deepinfra")
+  }
+
+  // Hyperbolic
+  if (env.HYPERBOLIC_API_KEY) {
+    const { createHyperbolicProvider } = await import("@/providers/hyperbolic")
+    registry.register(createHyperbolicProvider(env.HYPERBOLIC_API_KEY))
+    registered.push("hyperbolic")
+  }
+
+  // SambaNova
+  if (env.SAMBANOVA_API_KEY) {
+    const { createSambaNovaProvider } = await import("@/providers/sambanova")
+    registry.register(createSambaNovaProvider(env.SAMBANOVA_API_KEY))
+    registered.push("sambanova")
+  }
+
+  // Novita
+  if (env.NOVITA_API_KEY) {
+    const { createNovitaProvider } = await import("@/providers/novita")
+    registry.register(createNovitaProvider(env.NOVITA_API_KEY))
+    registered.push("novita")
+  }
+
+  // Moonshot (Kimi)
+  if (env.MOONSHOT_API_KEY) {
+    const { createMoonshotProvider } = await import("@/providers/moonshot")
+    registry.register(createMoonshotProvider(env.MOONSHOT_API_KEY))
+    registered.push("moonshot")
+  }
+
+  // Z.AI / Zhipu
+  if (env.ZAI_API_KEY) {
+    const { createZAIProvider } = await import("@/providers/zai")
+    registry.register(createZAIProvider(env.ZAI_API_KEY))
+    registered.push("zai")
+  }
+
+  // Nvidia NIM
+  if (env.NVIDIA_API_KEY) {
+    const { createNvidiaNimProvider } = await import("@/providers/nvidia-nim")
+    registry.register(createNvidiaNimProvider(env.NVIDIA_API_KEY))
+    registered.push("nvidia")
+  }
+
+  // vLLM (self-hosted)
+  if (env.VLLM_BASE_URL) {
+    const { createVLLMProvider } = await import("@/providers/vllm")
+    registry.register(createVLLMProvider(env.VLLM_BASE_URL, env.VLLM_API_KEY))
+    registered.push("vllm")
+  }
+
+  // Voyage AI (embeddings + rerank)
+  if (env.VOYAGE_API_KEY) {
+    const { createVoyageProvider } = await import("@/providers/voyage")
+    registry.register(createVoyageProvider(env.VOYAGE_API_KEY))
+    registered.push("voyage")
+  }
+
   // Custom OpenAI-compatible providers via CUSTOM_PROVIDERS env var
   if (env.CUSTOM_PROVIDERS) {
     try {
@@ -309,28 +390,7 @@ async function main() {
   }, "summoned-gateway ready")
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket handler for real-time log streaming (Bun native)
-// ---------------------------------------------------------------------------
-
-const websocketConfig = {
-  open(ws: any) {
-    wsClients.add(ws)
-    // Send recent logs on connect so the console loads instantly
-    const recent = getRecentLogs(100)
-    ws.send(JSON.stringify({ type: "init", logs: recent }))
-    logger.debug({ clients: wsClients.size }, "ws client connected")
-  },
-  close(ws: any) {
-    wsClients.delete(ws)
-    logger.debug({ clients: wsClients.size }, "ws client disconnected")
-  },
-  message(_ws: any, _msg: any) {
-    // No inbound messages expected; ignore
-  },
-}
-
-// Broadcast new log entries to all connected WebSocket clients
+// Broadcast new log entries to all connected WebSocket clients — runtime-agnostic.
 subscribe((entry) => {
   const payload = JSON.stringify({ type: "log", data: entry })
   for (const ws of wsClients) {
@@ -339,20 +399,39 @@ subscribe((entry) => {
 })
 
 // ---------------------------------------------------------------------------
-// Startup — use explicit Bun.serve() so we can store the server reference
-// in globalThis for the WebSocket upgrade handler.
+// Startup — uses the runtime adapter (Bun.serve on Bun, @hono/node-server +
+// @hono/node-ws on Node). Caller-supplied onWsOpen/Close callbacks wire the
+// global wsClients set; authorizeUpgrade gates the /ws/logs admin handshake.
 // ---------------------------------------------------------------------------
 
 main()
-  .then(() => {
-    const server = Bun.serve({
+  .then(() =>
+    startServer({
+      app,
       port: env.GATEWAY_PORT,
-      fetch: app.fetch,
-      websocket: websocketConfig,
-    })
-    // Store for use in the /ws/logs upgrade handler
-    ;(globalThis as any).__bunServer = server
-    logger.info({ port: env.GATEWAY_PORT, console: `http://localhost:${env.GATEWAY_PORT}/console` }, "http server listening")
+      wsPath: "/ws/logs",
+      authorizeUpgrade(req) {
+        const url = new URL(req.url)
+        const key = url.searchParams.get("key") ?? ""
+        return !!key && timingSafeEqual(key, env.ADMIN_API_KEY)
+      },
+      onWsOpen(ws) {
+        wsClients.add(ws)
+        const recent = getRecentLogs(100)
+        try { ws.send(JSON.stringify({ type: "init", logs: recent })) } catch { /* ignore */ }
+        logger.debug({ clients: wsClients.size }, "ws client connected")
+      },
+      onWsClose(ws) {
+        wsClients.delete(ws)
+        logger.debug({ clients: wsClients.size }, "ws client disconnected")
+      },
+    }),
+  )
+  .then(() => {
+    logger.info(
+      { port: env.GATEWAY_PORT, console: `http://localhost:${env.GATEWAY_PORT}/console` },
+      "http server listening",
+    )
   })
   .catch((err) => {
     logger.fatal({ err }, "gateway failed to start")

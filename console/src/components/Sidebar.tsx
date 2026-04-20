@@ -1,4 +1,5 @@
 import type { Page } from "../App"
+import { clearAdminKey } from "../lib/adminKey"
 
 const navItems: { id: Page; label: string; icon: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" },
@@ -48,8 +49,14 @@ export default function Sidebar({ currentPage, onNavigate }: Props) {
         ))}
       </nav>
 
-      <div className="px-3 py-3 border-t border-gray-200">
-        <div className="px-3 py-2 text-[11px] text-gray-400">
+      <div className="px-3 py-3 border-t border-gray-200 space-y-1">
+        <button
+          onClick={() => { clearAdminKey(); window.location.reload() }}
+          className="w-full text-left px-3 py-1.5 rounded-md text-[11px] font-medium text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+        >
+          Sign out
+        </button>
+        <div className="px-3 py-1 text-[11px] text-gray-400">
           v0.1.0 &middot; Open Source
         </div>
       </div>

@@ -1,6 +1,6 @@
 # Summoned AI Gateway
 
-Sovereign AI infrastructure for India. Multi-provider, OpenAI-compatible gateway routing to 9 LLM providers with auth, rate limiting, cost tracking, caching, guardrails, virtual keys, and audit logging.
+Sovereign AI infrastructure for India. Multi-provider, OpenAI-compatible gateway routing to 28+ LLM providers with auth, rate limiting, cost tracking, caching, guardrails, virtual keys, and audit logging.
 
 ## Architecture
 
@@ -41,6 +41,25 @@ Sovereign AI infrastructure for India. Multi-provider, OpenAI-compatible gateway
 | Ollama | OpenAI-compatible (local) | `OLLAMA_BASE_URL` |
 | Sarvam AI | OpenAI-compatible (India) | `SARVAM_API_KEY` |
 | Yotta Labs | OpenAI-compatible (India) | `YOTTA_API_KEY` |
+| Mistral | OpenAI-compatible | `MISTRAL_API_KEY` |
+| Together AI | OpenAI-compatible | `TOGETHER_API_KEY` |
+| DeepSeek | OpenAI-compatible | `DEEPSEEK_API_KEY` |
+| Fireworks AI | OpenAI-compatible | `FIREWORKS_API_KEY` |
+| Cohere | OpenAI-compatible | `COHERE_API_KEY` |
+| Cerebras | OpenAI-compatible | `CEREBRAS_API_KEY` |
+| Perplexity | OpenAI-compatible | `PERPLEXITY_API_KEY` |
+| xAI / Grok | OpenAI-compatible | `XAI_API_KEY` |
+| OpenRouter | OpenAI-compatible (aggregator) | `OPENROUTER_API_KEY` |
+| HuggingFace | OpenAI-compatible (router) | `HUGGINGFACE_API_KEY` |
+| DeepInfra | OpenAI-compatible | `DEEPINFRA_API_KEY` |
+| Hyperbolic | OpenAI-compatible | `HYPERBOLIC_API_KEY` |
+| SambaNova | OpenAI-compatible | `SAMBANOVA_API_KEY` |
+| Novita AI | OpenAI-compatible | `NOVITA_API_KEY` |
+| Moonshot (Kimi) | OpenAI-compatible | `MOONSHOT_API_KEY` |
+| Z.AI (GLM) | OpenAI-compatible | `ZAI_API_KEY` |
+| Nvidia NIM | OpenAI-compatible | `NVIDIA_API_KEY` |
+| vLLM | OpenAI-compatible (self-hosted) | `VLLM_BASE_URL` + optional `VLLM_API_KEY` |
+| Voyage AI | OpenAI-compatible (embeddings/rerank) | `VOYAGE_API_KEY` |
 
 ## Model Format
 

@@ -1,7 +1,27 @@
 import { useState, useEffect, useCallback } from "react"
 import { api, type VirtualKeyInfo } from "../lib/api"
 
-const PROVIDERS = ["openai", "anthropic", "google", "groq", "azure", "bedrock", "ollama", "sarvam", "yotta"]
+// Must stay in sync with src/lib/provider-resolve.ts:createEphemeralProvider.
+// Ordered by rough usage priority so the dropdown puts popular choices first.
+const PROVIDERS = [
+  "openai", "anthropic", "google", "bedrock", "azure",
+  "groq", "mistral", "together", "deepseek", "fireworks",
+  "cohere", "cerebras", "perplexity", "xai",
+  "sarvam", "yotta",
+  "openrouter", "huggingface", "deepinfra", "hyperbolic", "sambanova",
+  "novita", "moonshot", "zai", "nvidia",
+  "ollama", "vllm",
+  "voyage",
+] as const
+
+// Providers that need extra config beyond an API key. UI surfaces these as
+// additional input rows and POSTs them inside `providerConfig`.
+const PROVIDER_CONFIG_FIELDS: Record<string, { key: string; label: string; placeholder: string; required: boolean }[]> = {
+  azure: [{ key: "endpoint", label: "Azure Endpoint", placeholder: "https://<your-resource>.openai.azure.com", required: true }],
+  ollama: [{ key: "baseUrl", label: "Base URL", placeholder: "http://localhost:11434", required: false }],
+  vllm: [{ key: "baseUrl", label: "Base URL", placeholder: "http://localhost:8000/v1", required: true }],
+  bedrock: [{ key: "region", label: "AWS Region", placeholder: "ap-south-1", required: false }],
+}
 
 export default function VirtualKeys() {
   const [keys, setKeys] = useState<VirtualKeyInfo[]>([])
@@ -11,8 +31,9 @@ export default function VirtualKeys() {
   const [error, setError] = useState("")
   const [formName, setFormName] = useState("")
   const [formTenant, setFormTenant] = useState("default")
-  const [formProvider, setFormProvider] = useState("openai")
+  const [formProvider, setFormProvider] = useState<string>("openai")
   const [formApiKey, setFormApiKey] = useState("")
+  const [formConfig, setFormConfig] = useState<Record<string, string>>({})
   const [creating, setCreating] = useState(false)
 
   const loadKeys = useCallback(() => {
@@ -24,10 +45,26 @@ export default function VirtualKeys() {
 
   const handleCreate = async () => {
     if (!formName.trim() || !formApiKey.trim()) return
+    const requiredFields = PROVIDER_CONFIG_FIELDS[formProvider]?.filter((f) => f.required) ?? []
+    for (const f of requiredFields) {
+      if (!formConfig[f.key]?.trim()) {
+        setError(`${f.label} is required for ${formProvider}`)
+        return
+      }
+    }
     setCreating(true); setError("")
     try {
-      await api.createVirtualKey({ name: formName.trim(), tenantId: formTenant, providerId: formProvider, apiKey: formApiKey.trim() })
-      setShowCreate(false); setFormName(""); setFormApiKey(""); loadKeys()
+      const cleanedConfig = Object.fromEntries(
+        Object.entries(formConfig).filter(([, v]) => v.trim() !== "")
+      )
+      await api.createVirtualKey({
+        name: formName.trim(),
+        tenantId: formTenant,
+        providerId: formProvider,
+        apiKey: formApiKey.trim(),
+        providerConfig: Object.keys(cleanedConfig).length ? cleanedConfig : undefined,
+      })
+      setShowCreate(false); setFormName(""); setFormApiKey(""); setFormConfig({}); loadKeys()
     } catch (e: any) { setError(e.message) } finally { setCreating(false) }
   }
 
@@ -67,7 +104,11 @@ export default function VirtualKeys() {
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Provider</label>
-              <select value={formProvider} onChange={(e) => setFormProvider(e.target.value)} className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/30">
+              <select
+                value={formProvider}
+                onChange={(e) => { setFormProvider(e.target.value); setFormConfig({}) }}
+                className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+              >
                 {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
               </select>
             </div>
@@ -75,6 +116,19 @@ export default function VirtualKeys() {
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Provider API Key</label>
               <input value={formApiKey} onChange={(e) => setFormApiKey(e.target.value)} type="password" placeholder="sk-..." className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400" />
             </div>
+            {(PROVIDER_CONFIG_FIELDS[formProvider] ?? []).map((field) => (
+              <div key={field.key} className="col-span-2">
+                <label className="block text-xs font-medium text-gray-500 mb-1.5">
+                  {field.label} {field.required && <span className="text-red-500">*</span>}
+                </label>
+                <input
+                  value={formConfig[field.key] ?? ""}
+                  onChange={(e) => setFormConfig({ ...formConfig, [field.key]: e.target.value })}
+                  placeholder={field.placeholder}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400"
+                />
+              </div>
+            ))}
           </div>
           <div className="flex gap-2">
             <button onClick={handleCreate} disabled={creating || !formName.trim() || !formApiKey.trim()} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-md transition-colors">{creating ? "Encrypting..." : "Create"}</button>

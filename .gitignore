@@ -25,3 +25,9 @@ Thumbs.db
 # Demo recording tooling — not part of the project
 scripts/
 assets/screenshots/
+
+# Claude Code local settings
+.claude/
+
+# npm pack smoke artifacts
+*.tgz

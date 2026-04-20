@@ -1,11 +1,12 @@
 import { useState, useRef } from "react"
 
 interface Message { role: "user" | "assistant"; content: string }
-type AuthMode = "managed" | "byok"
+type AuthMode = "managed" | "byok" | "virtual"
 
 export default function Playground() {
   const [authMode, setAuthMode] = useState<AuthMode>("managed")
   const [apiKey, setApiKey] = useState("")
+  const [virtualKeyId, setVirtualKeyId] = useState("")
   const [model, setModel] = useState("openai/gpt-4o-mini")
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
@@ -21,7 +22,15 @@ export default function Playground() {
   const send = async () => {
     if (!input.trim() || loading) return
     if (!apiKey.trim()) {
-      setError(authMode === "managed" ? "Enter a Summoned API key (sk-smnd-...)" : "Enter your provider API key (e.g. sk-ant-..., sk-...)")
+      setError(
+        authMode === "managed" || authMode === "virtual"
+          ? "Enter a Summoned API key (sk-smnd-...)"
+          : "Enter your provider API key (e.g. sk-ant-..., sk-...)"
+      )
+      return
+    }
+    if (authMode === "virtual" && !virtualKeyId.trim()) {
+      setError("Enter a virtual key ID (vk_...)")
       return
     }
 
@@ -30,17 +39,25 @@ export default function Playground() {
     setMessages(newMessages); setInput(""); setError(""); setLoading(true)
 
     const headers: Record<string, string> = { "Content-Type": "application/json" }
-    if (authMode === "managed") {
+    if (authMode === "managed" || authMode === "virtual") {
       headers["Authorization"] = `Bearer ${apiKey}`
     } else {
       headers["x-provider-key"] = apiKey
+    }
+
+    const requestBody: Record<string, unknown> = {
+      model,
+      messages: newMessages.map((m) => ({ role: m.role, content: m.content })),
+    }
+    if (authMode === "virtual") {
+      requestBody.config = { virtualKey: virtualKeyId.trim() }
     }
 
     try {
       const res = await fetch(`${gatewayUrl}/v1/chat/completions`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ model, messages: newMessages.map((m) => ({ role: m.role, content: m.content })) }),
+        body: JSON.stringify(requestBody),
       })
 
       const info: Record<string, string> = {}
@@ -78,13 +95,19 @@ export default function Playground() {
         {/* Auth mode toggle */}
         <div className="flex gap-1 mb-3 bg-gray-100 rounded-lg p-1 w-fit">
           <button
-            onClick={() => { setAuthMode("managed"); setApiKey("") }}
+            onClick={() => { setAuthMode("managed"); setApiKey(""); setVirtualKeyId("") }}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${authMode === "managed" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
           >
             Managed Key
           </button>
           <button
-            onClick={() => { setAuthMode("byok"); setApiKey("") }}
+            onClick={() => { setAuthMode("virtual"); setApiKey("") }}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${authMode === "virtual" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+          >
+            Virtual Key
+          </button>
+          <button
+            onClick={() => { setAuthMode("byok"); setApiKey(""); setVirtualKeyId("") }}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${authMode === "byok" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
           >
             BYOK (Your Provider Key)
@@ -94,13 +117,13 @@ export default function Playground() {
         <div className="flex gap-3">
           <div className="flex-1">
             <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1">
-              {authMode === "managed" ? "Summoned API Key" : "Provider API Key"}
+              {authMode === "byok" ? "Provider API Key" : "Summoned API Key"}
             </label>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={authMode === "managed" ? "sk-smnd-..." : "sk-ant-... / sk-... / AIza..."}
+              placeholder={authMode === "byok" ? "sk-ant-... / sk-... / AIza..." : "sk-smnd-..."}
               className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400"
             />
             {authMode === "byok" && (
@@ -108,7 +131,23 @@ export default function Playground() {
                 Key sent as <code className="bg-gray-100 px-1 rounded">x-provider-key</code> header — never stored
               </p>
             )}
+            {authMode === "virtual" && (
+              <p className="text-[11px] text-gray-400 mt-1">
+                Summoned key authenticates the request; the virtual key supplies the provider credentials
+              </p>
+            )}
           </div>
+          {authMode === "virtual" && (
+            <div className="w-56">
+              <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1">Virtual Key</label>
+              <input
+                value={virtualKeyId}
+                onChange={(e) => setVirtualKeyId(e.target.value)}
+                placeholder="vk_..."
+                className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm text-gray-900 font-mono placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400"
+              />
+            </div>
+          )}
           <div className="w-64">
             <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1">Model</label>
             <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="provider/model" className="w-full bg-gray-50 border border-gray-200 rounded-md px-3 py-2 text-sm text-gray-900 font-mono placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400" />

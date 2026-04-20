@@ -1,24 +1,73 @@
 {
-  "name": "summoned-gateway",
+  "name": "@summoned/gateway",
   "version": "0.1.0",
-  "description": "Summoned AI Gateway — sovereign AI infrastructure for India",
-  "private": true,
+  "description": "Open-source OpenAI-compatible AI gateway. 28 providers, routing, fallback, caching, guardrails, budgets, and a built-in console. Run in 15 seconds: npx @summoned/gateway",
   "type": "module",
+  "bin": {
+    "summoned-gateway": "dist/cli.mjs"
+  },
+  "main": "dist/cli.mjs",
+  "files": [
+    "dist",
+    "public/console",
+    "drizzle",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "dev": "bun --hot src/index.ts",
-    "build": "bun build src/index.ts --outfile dist/index.mjs --target bun --minify",
-    "start": "bun dist/index.mjs",
+    "build": "npm run build:console && npm run build:node",
+    "build:console": "cd console && npm ci --no-audit --no-fund && npm run build",
+    "build:node": "bun build src/cli.ts --target=node --outfile dist/cli.mjs --minify",
+    "build:bun": "bun build src/index.ts --outfile dist/index.mjs --target bun --minify",
+    "start": "node dist/cli.mjs",
+    "start:bun": "bun dist/index.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
-    "check-types": "tsc --noEmit"
+    "check-types": "tsc --noEmit",
+    "test": "bun test tests",
+    "prepublishOnly": "npm run build"
   },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "ai",
+    "llm",
+    "gateway",
+    "proxy",
+    "openai",
+    "anthropic",
+    "bedrock",
+    "gemini",
+    "groq",
+    "sarvam",
+    "multi-provider",
+    "fallback",
+    "guardrails",
+    "caching",
+    "routing",
+    "summoned"
+  ],
+  "author": "Summoned Tech <dev@summoned.tech>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/summoned-tech/summoned-ai-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/summoned-tech/summoned-ai-gateway/issues"
+  },
+  "homepage": "https://github.com/summoned-tech/summoned-ai-gateway",
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^4.0.89",
     "@ai-sdk/anthropic": "^3.0.68",
     "@ai-sdk/google": "^3.0.61",
     "@ai-sdk/openai": "^3.0.52",
     "@aws-sdk/client-bedrock": "^3.750.0",
+    "@hono/node-server": "^1.19.14",
+    "@hono/node-ws": "^1.3.0",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-prometheus": "^0.57.2",
     "@opentelemetry/exporter-trace-otlp-http": "^0.57.2",

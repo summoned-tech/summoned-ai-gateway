@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react"
 import Sidebar from "./components/Sidebar"
+import AuthGate from "./components/AuthGate"
 import Dashboard from "./pages/Dashboard"
 import Logs from "./pages/Logs"
 import Keys from "./pages/Keys"
@@ -22,16 +23,18 @@ export default function App() {
   }, [page])
 
   return (
-    <div className="flex h-screen bg-gray-50 text-gray-900">
-      <Sidebar currentPage={page} onNavigate={setPage} />
-      <main className="flex-1 overflow-auto">
-        {page === "dashboard" && <Dashboard />}
-        {page === "logs" && <Logs />}
-        {page === "keys" && <Keys />}
-        {page === "virtual-keys" && <VirtualKeys />}
-        {page === "providers" && <Providers />}
-        {page === "playground" && <Playground />}
-      </main>
-    </div>
+    <AuthGate>
+      <div className="flex h-screen bg-gray-50 text-gray-900">
+        <Sidebar currentPage={page} onNavigate={setPage} />
+        <main className="flex-1 overflow-auto">
+          {page === "dashboard" && <Dashboard />}
+          {page === "logs" && <Logs />}
+          {page === "keys" && <Keys />}
+          {page === "virtual-keys" && <VirtualKeys />}
+          {page === "providers" && <Providers />}
+          {page === "playground" && <Playground />}
+        </main>
+      </div>
+    </AuthGate>
   )
 }

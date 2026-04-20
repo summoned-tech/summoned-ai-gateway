@@ -73,6 +73,40 @@ const schema = z.object({
   // xAI / Grok
   XAI_API_KEY: z.string().default(""),
 
+  // OpenRouter — aggregator for 100+ models across providers
+  OPENROUTER_API_KEY: z.string().default(""),
+
+  // HuggingFace Inference Router
+  HUGGINGFACE_API_KEY: z.string().default(""),
+
+  // DeepInfra
+  DEEPINFRA_API_KEY: z.string().default(""),
+
+  // Hyperbolic
+  HYPERBOLIC_API_KEY: z.string().default(""),
+
+  // SambaNova
+  SAMBANOVA_API_KEY: z.string().default(""),
+
+  // Novita AI
+  NOVITA_API_KEY: z.string().default(""),
+
+  // Moonshot AI (Kimi)
+  MOONSHOT_API_KEY: z.string().default(""),
+
+  // Z.AI (Zhipu / GLM)
+  ZAI_API_KEY: z.string().default(""),
+
+  // Nvidia NIM
+  NVIDIA_API_KEY: z.string().default(""),
+
+  // vLLM — generic self-hosted OpenAI-compat server. Base URL required; key optional.
+  VLLM_BASE_URL: z.string().default(""),
+  VLLM_API_KEY: z.string().default(""),
+
+  // Voyage AI — embeddings + reranking
+  VOYAGE_API_KEY: z.string().default(""),
+
   // Custom OpenAI-compatible providers — JSON array of {id, name, baseUrl, apiKey}
   // Example: [{"id":"myprovider","name":"My LLM","baseUrl":"https://api.example.com/v1","apiKey":"sk-..."}]
   CUSTOM_PROVIDERS: z.string().default(""),

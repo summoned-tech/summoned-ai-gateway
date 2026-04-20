@@ -21,6 +21,8 @@ async function fetchAvailableModels(): Promise<FoundationModelSummary[]> {
       secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
     }
   }
+  // Instance-profile path: leave `credentials` unset — the AWS v3 SDK's
+  // default provider chain resolves IAM role creds from IMDS automatically.
 
   const client = new BedrockClient(opts)
   const response = await client.send(new ListFoundationModelsCommand({
@@ -87,6 +89,20 @@ async function getAiSdkProvider() {
   } else if (env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY) {
     opts.accessKeyId = env.AWS_ACCESS_KEY_ID
     opts.secretAccessKey = env.AWS_SECRET_ACCESS_KEY
+  } else if (env.AWS_USE_INSTANCE_PROFILE) {
+    // The AI SDK does not walk the default AWS cred chain on its own, so we
+    // plug in the v3 SDK's provider chain. This resolves creds from env →
+    // shared profile → SSO → IAM role via IMDS (EC2/ECS/EKS).
+    const { defaultProvider } = await import("@aws-sdk/credential-provider-node")
+    const provider = defaultProvider()
+    opts.credentialProvider = async () => {
+      const c = await provider()
+      return {
+        accessKeyId: c.accessKeyId,
+        secretAccessKey: c.secretAccessKey,
+        sessionToken: c.sessionToken,
+      }
+    }
   }
 
   // Zod v4 + AI SDK produces broken JSON schemas for tools — intercept and fix

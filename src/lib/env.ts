@@ -5,7 +5,8 @@ const schema = z.object({
   GATEWAY_PORT: z.coerce.number().default(4000),
 
   // Admin — used to create/rotate API keys via POST /v1/keys
-  ADMIN_API_KEY: z.string().min(32),
+  // Auto-generated for local/dev if unset; required explicitly in production.
+  ADMIN_API_KEY: z.string().default(""),
 
   // Encryption key for virtual keys (AES-256-GCM via HKDF).
   // Generate: openssl rand -hex 32
@@ -22,6 +23,10 @@ const schema = z.object({
   AWS_ACCESS_KEY_ID: z.string().default(""),
   AWS_SECRET_ACCESS_KEY: z.string().default(""),
   AWS_BEDROCK_API_KEY: z.string().default(""),
+  // Opt-in to rely on EC2 / ECS / EKS instance-profile credentials (IAM role).
+  // When true, Bedrock is registered without explicit keys and the AWS SDK's
+  // default credential chain resolves the role automatically.
+  AWS_USE_INSTANCE_PROFILE: z.string().default("false").transform((v) => v === "true"),
   BEDROCK_DEMO_MODE: z.string().default("false").transform((v) => v === "true"),
 
   // OpenAI
@@ -149,7 +154,26 @@ function load() {
     console.error("[summoned-gateway] Invalid env:", result.error.flatten().fieldErrors)
     throw new Error("Invalid environment variables")
   }
-  return result.data
+
+  const data = result.data
+
+  if (!data.ADMIN_API_KEY) {
+    if (data.NODE_ENV === "production" || data.NODE_ENV === "staging") {
+      console.error("[summoned-gateway] ADMIN_API_KEY must be set in production/staging. Generate one with: openssl rand -hex 32")
+      throw new Error("ADMIN_API_KEY required")
+    }
+    const randomKey = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+    data.ADMIN_API_KEY = randomKey
+    const border = "═".repeat(66)
+    console.warn(`\n${border}\n  ADMIN_API_KEY auto-generated (ephemeral — changes every restart)\n  Use this key for the console and POST /v1/keys:\n\n    ${randomKey}\n\n  Set ADMIN_API_KEY env var explicitly to persist across restarts.\n${border}\n`)
+  } else if (data.ADMIN_API_KEY.length < 32) {
+    console.error("[summoned-gateway] ADMIN_API_KEY must be at least 32 characters")
+    throw new Error("ADMIN_API_KEY too short")
+  }
+
+  return data
 }
 
 export const env = load()

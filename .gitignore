@@ -7,9 +7,6 @@ dist/
 # Console build output (rebuilt from console/ source)
 public/console/
 
-# Drizzle generated metadata (migrations SQL is committed)
-drizzle/meta/
-
 # IDE
 .vscode/
 .idea/

@@ -1,0 +1,48 @@
+# Minimal single-box deploy (gateway + postgres only, no Redis).
+#
+# Usage (on an EC2/VM with Docker installed):
+#   mkdir /opt/gateway && cd /opt/gateway
+#   git clone https://github.com/summoned-tech/summoned-ai-gateway.git .
+#   cp .env.example .env       # edit: provider keys, ADMIN_API_KEY, etc.
+#   docker compose -f deploy/ec2-compose.yml up -d --build
+#
+# Port 80 is the default because corporate networks often block 4000.
+# If you terminate TLS elsewhere (ALB, Caddy, Cloudflare), keep as-is.
+# On AWS with an IAM instance profile, set AWS_USE_INSTANCE_PROFILE=true in .env
+# and omit AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+
+services:
+  gateway:
+    build: ..
+    ports:
+      - "${GATEWAY_HOST_PORT:-80}:4000"
+    env_file: ../.env
+    environment:
+      POSTGRES_URL: postgresql://summoned:summoned@postgres:5432/summoned_gateway
+      REDIS_URL: ""
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:4000/health').then(r=>{if(!r.ok)throw 1})"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: summoned
+      POSTGRES_PASSWORD: summoned
+      POSTGRES_DB: summoned_gateway
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U summoned -d summoned_gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pg_data:

@@ -134,8 +134,9 @@ const wsClients = new Set<WsLike>()
 async function registerProviders() {
   const registered: string[] = []
 
-  // AWS Bedrock
-  if (env.AWS_BEDROCK_API_KEY || env.AWS_ACCESS_KEY_ID) {
+  // AWS Bedrock — register when any auth path is available
+  // (explicit keys, or IAM role / instance profile via default cred chain)
+  if (env.AWS_BEDROCK_API_KEY || env.AWS_ACCESS_KEY_ID || env.AWS_USE_INSTANCE_PROFILE) {
     const { createBedrockProvider, refreshModelCache } = await import("@/providers/bedrock")
     const provider = await createBedrockProvider()
     registry.register(provider)

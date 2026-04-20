@@ -11,7 +11,7 @@ FROM base AS builder
 COPY package.json bun.lock* ./
 RUN bun install --frozen-lockfile
 COPY . .
-RUN bun run build
+RUN bun run build:bun
 
 # Build console SPA
 FROM node:22-alpine AS console-builder

@@ -15,6 +15,7 @@ Sovereign AI infrastructure for India. Multi-provider, OpenAI-compatible gateway
 - **Cache** (`src/lib/cache.ts`) — Redis-backed response cache. Keyed by SHA-256 of (model + messages + params). Configurable TTL.
 - **Guardrails** (`src/lib/guardrails.ts`) — Input/output validation: word deny lists, regex patterns, length limits, PII detection (email, phone, Aadhaar, SSN, credit card).
 - **Virtual Keys** (`src/lib/provider-resolve.ts`, `src/routers/virtual-keys.ts`) — Encrypted provider credentials stored in DB. SDK users reference a virtual key ID instead of raw provider API keys.
+- **Prompts** (`src/lib/prompts.ts`, `src/routers/prompts.ts`) — Versioned prompt templates. Callers reference by `config.promptId` (slug, slug@version, or prm_id) with `{{variable}}` interpolation. See rfcs/0001-prompt-management.md.
 - **Circuit Breaker** (`src/lib/circuit-breaker.ts`) — Per-provider circuit breaker (closed → open → half-open).
 - **Log Buffer** (`src/lib/log-buffer.ts`) — In-memory ring buffer (1000 entries) for real-time log streaming via WebSocket.
 - **Crypto** (`src/lib/crypto.ts`) — AES-256-GCM encryption for virtual key storage.
@@ -79,6 +80,12 @@ DELETE /v1/keys/:id               # Admin: revoke key
 POST /admin/virtual-keys          # Create virtual key (encrypted provider creds)
 GET  /admin/virtual-keys?tenantId # List virtual keys
 DELETE /admin/virtual-keys/:id    # Revoke virtual key
+POST /admin/prompts               # Create prompt version (auto-increments)
+GET  /admin/prompts?tenantId=...  # List latest prompts
+GET  /admin/prompts/by-slug/:slug # Latest version for a slug
+GET  /admin/prompts/:slug/versions # Version history for a slug
+GET  /admin/prompts/:id           # Fetch by primary key
+DELETE /admin/prompts/:id         # Soft-delete a prompt version
 GET  /admin/logs                  # Recent logs (buffer or DB)
 GET  /admin/stats                 # Aggregate stats (24h/7d/30d)
 GET  /admin/providers             # Provider health + status
@@ -100,6 +107,8 @@ Pass via `x-summoned-config` header (base64 JSON or raw JSON) or `config` field 
   "cache": true,
   "cacheTtl": 3600,
   "virtualKey": "vk_abc123",
+  "promptId": "customer-support@3",
+  "promptVariables": { "tone": "friendly", "max_bullets": "5" },
   "traceId": "my-trace-id",
   "metadata": { "env": "production", "feature": "chatbot" },
   "guardrails": {

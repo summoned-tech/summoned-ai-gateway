@@ -60,6 +60,34 @@ export const virtualKey = pgTable(
 )
 
 // ---------------------------------------------------------------------------
+// Prompts — versioned prompt templates resolved at request time
+// See rfcs/0001-prompt-management.md
+// ---------------------------------------------------------------------------
+
+export const prompt = pgTable(
+  "prompts",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull(),
+    slug: text("slug").notNull(),
+    version: integer("version").notNull(),
+    // OpenAI-format messages with `{{var}}` placeholders
+    template: jsonb("template").$type<Array<Record<string, unknown>>>().notNull(),
+    // Optional { name: default_value } map
+    variables: jsonb("variables").$type<Record<string, string>>(),
+    defaultModel: text("default_model"),
+    description: text("description"),
+    isLatest: boolean("is_latest").notNull().default(true),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("prompts_tenant_idx").on(t.tenantId),
+    index("prompts_tenant_slug_idx").on(t.tenantId, t.slug),
+  ],
+)
+
+// ---------------------------------------------------------------------------
 // Request Logs — immutable audit trail for every completion request
 // ---------------------------------------------------------------------------
 
@@ -90,6 +118,8 @@ export const requestLog = pgTable(
     costUsd: real("cost_usd"),
     costInr: real("cost_inr"),
     cacheHit: boolean("cache_hit").default(false),
+    promptId: text("prompt_id"),
+    promptVersion: integer("prompt_version"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [

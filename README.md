@@ -50,6 +50,7 @@
 - [x] **Full console, self-hosted, free** — dashboard, live logs, playground, cost analytics. No cloud subscription needed.
 - [x] **Guardrails in the free tier** — PII blocking, content filters, regex rules. Competitors lock this behind enterprise.
 - [x] **Virtual keys** — store provider credentials encrypted (AES-256-GCM). Callers reference a `vk_...` id; raw keys never leave the server.
+- [x] **Versioned prompt management** — first OSS gateway with first-class, Postgres-backed prompt templates. `{{variables}}`, auto-incrementing versions, `prompt_id` on every audit log. [Portkey keeps this enterprise-only; LiteLLM's is in-memory](#prompt-management).
 - [x] **Daily token budgets** — hard caps per API key. Critical for agents. Free.
 - [x] **Official TypeScript SDK** — [`@summoned/ai`](https://www.npmjs.com/package/@summoned/ai) on npm.
 
@@ -425,6 +426,54 @@ llm = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-smnd-...")
 | **Console lockdown** | `/console/api/*` requires `x-admin-key` on every request; CORS scoped to `/v1` and `/health` only. |
 | **BYOK mode** | Pass provider key via `x-provider-key` header. No gateway key required. IP-rate-limited. |
 
+### Prompt Management
+
+Versioned prompt templates, stored on the gateway. Reference by slug + version
+from any client — curl, OpenAI SDK, Summoned SDK — and never redeploy an app
+just to change a system prompt again.
+
+```bash
+# Create v1 of a prompt
+curl -X POST http://localhost:4000/admin/prompts \
+  -H "x-admin-key: $ADMIN_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{
+    "slug": "customer-support",
+    "tenantId": "default",
+    "template": [
+      {"role": "system", "content": "You are a {{tone}} support agent."},
+      {"role": "user",   "content": "{{user_question}}"}
+    ],
+    "variables": { "tone": "friendly" },
+    "defaultModel": "openai/gpt-4o"
+  }'
+
+# Use it in any completion (the template is interpolated + prepended)
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-smnd-..." \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o",
+    "messages": [],
+    "config": {
+      "promptId": "customer-support",
+      "promptVariables": { "user_question": "Where is my order?" }
+    }
+  }'
+```
+
+| Feature | How it works |
+|---|---|
+| **Versioned templates** | `POST /admin/prompts` with the same `slug` auto-increments the version. Use `"promptId": "slug@3"` to pin, or bare `"slug"` for latest. |
+| **Variable interpolation** | `{{name}}` placeholders are replaced from `config.promptVariables` (caller) or the template's `variables` (defaults). Missing variables survive literally so bugs are visible. |
+| **Default model** | Prompts can pin a model. Caller-specified `model` always wins. |
+| **Audit trail** | Every request logs which `prompt_id` + `prompt_version` was used. |
+| **Zero lock-in** | Just a Postgres table. Drizzle schema in-repo. Export with `pg_dump`; portable to anywhere. |
+
+_Other gateways charge for this or keep it in-memory. We don't._ See
+[`rfcs/0001-prompt-management.md`](./rfcs/0001-prompt-management.md) for the
+design, or the Console's **Prompts** tab for the UI.
+
 ### Performance
 
 | Feature | How it works |
@@ -452,6 +501,7 @@ llm = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-smnd-...")
 | `/v1/models` | GET | — | List registered providers |
 | `/v1/keys` | POST / GET / DELETE | `x-admin-key` | API key management |
 | `/admin/virtual-keys` | POST / GET / DELETE | `x-admin-key` | Virtual key management |
+| `/admin/prompts` | POST / GET / DELETE | `x-admin-key` | Versioned prompt templates |
 | `/admin/logs` | GET | `x-admin-key` | Request logs (buffer or DB) |
 | `/admin/stats` | GET | `x-admin-key` | Aggregated statistics |
 | `/admin/providers` | GET | `x-admin-key` | Provider health + circuit breaker state |

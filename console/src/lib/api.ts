@@ -54,6 +54,21 @@ export const api = {
 
   revokeVirtualKey: (id: string) =>
     request<{ id: string; revoked: boolean }>("DELETE", `/virtual-keys/${id}`),
+
+  listPrompts: (tenantId: string) =>
+    request<{ data: PromptInfo[] }>("GET", `/prompts?tenantId=${encodeURIComponent(tenantId)}`),
+
+  createPrompt: (body: CreatePromptBody) =>
+    request<PromptInfo>("POST", `/prompts`, body),
+
+  getPromptVersions: (slug: string, tenantId: string) =>
+    request<{ data: PromptInfo[] }>(
+      "GET",
+      `/prompts/${encodeURIComponent(slug)}/versions?tenantId=${encodeURIComponent(tenantId)}`,
+    ),
+
+  deletePrompt: (id: string) =>
+    request<{ id: string; deleted: boolean }>("DELETE", `/prompts/${encodeURIComponent(id)}`),
 }
 
 export interface LogEntry {
@@ -133,4 +148,32 @@ export interface VirtualKeyInfo {
   isActive: boolean
   createdAt: string
   lastUsedAt: string | null
+}
+
+export interface PromptMessage {
+  role: "system" | "user" | "assistant"
+  content: string
+}
+
+export interface PromptInfo {
+  id: string
+  tenantId: string
+  slug: string
+  version: number
+  template: PromptMessage[]
+  variables: Record<string, string> | null
+  defaultModel: string | null
+  description: string | null
+  isLatest: boolean
+  isActive: boolean
+  createdAt: string
+}
+
+export interface CreatePromptBody {
+  slug: string
+  tenantId: string
+  template: PromptMessage[]
+  variables?: Record<string, string>
+  defaultModel?: string
+  description?: string
 }

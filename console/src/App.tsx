@@ -5,10 +5,11 @@ import Dashboard from "./pages/Dashboard"
 import Logs from "./pages/Logs"
 import Keys from "./pages/Keys"
 import VirtualKeys from "./pages/VirtualKeys"
+import Prompts from "./pages/Prompts"
 import Providers from "./pages/Providers"
 import Playground from "./pages/Playground"
 
-export type Page = "dashboard" | "logs" | "keys" | "virtual-keys" | "providers" | "playground"
+export type Page = "dashboard" | "logs" | "keys" | "virtual-keys" | "prompts" | "providers" | "playground"
 
 export default function App() {
   const [page, setPage] = useState<Page>("logs")
@@ -31,6 +32,7 @@ export default function App() {
           {page === "logs" && <Logs />}
           {page === "keys" && <Keys />}
           {page === "virtual-keys" && <VirtualKeys />}
+          {page === "prompts" && <Prompts />}
           {page === "providers" && <Providers />}
           {page === "playground" && <Playground />}
         </main>

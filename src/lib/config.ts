@@ -38,6 +38,11 @@ export const configSchema = z.object({
 
   // Load balance — weight for this request (used with multiple keys)
   weight: z.record(z.string(), z.number()).optional(),
+
+  // Prompt management — see rfcs/0001-prompt-management.md
+  // Accepts "<slug>", "<slug>@<version>", or "prm_<id>"
+  promptId: z.string().optional(),
+  promptVariables: z.record(z.string(), z.string()).optional(),
 }).optional()
 
 export type SummonedConfig = z.infer<typeof configSchema>

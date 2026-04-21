@@ -15,6 +15,7 @@ import { pushLog } from "@/lib/log-buffer"
 import { getCacheKey, getCachedResponse, setCachedResponse } from "@/lib/cache"
 import { runGuardrails } from "@/lib/guardrails"
 import { resolveVirtualKey, createEphemeralProvider } from "@/lib/provider-resolve"
+import { resolvePrompt, interpolate, type ResolvedPrompt } from "@/lib/prompts"
 import type { ProviderAdapter } from "@/providers/base"
 import { isProviderAvailable, recordSuccess, recordFailure } from "@/lib/circuit-breaker"
 import { incrementDailyTokens } from "@/lib/budget"
@@ -209,6 +210,7 @@ function emitLog(vals: {
   inputTokens?: number; outputTokens?: number; latencyMs: number;
   streaming: boolean; status: "success" | "error"; errorMessage?: string;
   costUsd?: number; costInr?: number; cacheHit?: boolean;
+  promptId?: string | null; promptVersion?: number | null;
 }) {
   // Only persist to DB when Postgres is configured; always push to in-memory log buffer
   if (process.env.POSTGRES_URL) {
@@ -296,6 +298,54 @@ completionsRouter.post("/chat/completions", async (c: any) => {
     }
   }
 
+  // Prompt resolution — see rfcs/0001-prompt-management.md.
+  // Fetches the template, interpolates {{vars}}, prepends to req.messages,
+  // and optionally fills in req.model from the prompt's defaultModel.
+  let resolvedPromptMeta: { id: string; slug: string; version: number } | null = null
+  if (config?.promptId) {
+    if (!env.POSTGRES_URL) {
+      return c.json({
+        error: {
+          code: "PROMPT_REQUIRES_DB",
+          message: "Prompt management requires POSTGRES_URL. Running in stateless mode.",
+        },
+      }, 400)
+    }
+    let resolved: ResolvedPrompt | null = null
+    try {
+      resolved = await resolvePrompt(config.promptId, tenantId)
+    } catch (err) {
+      logger.warn({ err, promptId: config.promptId, tenantId }, "prompt resolution failed")
+    }
+    if (!resolved) {
+      return c.json({
+        error: {
+          code: "PROMPT_NOT_FOUND",
+          message: `Prompt "${config.promptId}" not found or inactive for tenant "${tenantId}".`,
+        },
+      }, 404)
+    }
+    const interpolated = interpolate(
+      resolved.template,
+      config.promptVariables ?? {},
+      resolved.variableDefaults,
+    )
+    // Template messages come first; caller messages follow.
+    req.messages = [...(interpolated as any[]), ...req.messages] as any
+
+    // Caller-specified model always wins; only fall back to prompt's default
+    // when caller did not specify one.
+    if ((!req.model || req.model.length === 0) && resolved.defaultModel) {
+      req.model = resolved.defaultModel
+    }
+
+    resolvedPromptMeta = { id: resolved.id, slug: resolved.slug, version: resolved.version }
+  }
+
+  if (!req.model) {
+    return c.json({ error: { code: "BAD_REQUEST", message: "model is required" } }, 400)
+  }
+
   // Build the model chain: primary + config fallbacks + body fallbacks,
   // then remove providers whose circuit breaker is currently OPEN (unless BYOK).
   const configFallbacks = config?.fallback ?? []
@@ -363,6 +413,8 @@ completionsRouter.post("/chat/completions", async (c: any) => {
         id: logId, apiKeyId, tenantId, userId, organizationId,
         requestedModel: req.model, resolvedModel: req.model, provider: "cache",
         latencyMs, streaming: false, status: "success", cacheHit: true,
+        promptId: resolvedPromptMeta?.id ?? null,
+        promptVersion: resolvedPromptMeta?.version ?? null,
       })
       return c.json(cached, 200, {
         "X-Summoned-Cache": "HIT",
@@ -514,6 +566,7 @@ completionsRouter.post("/chat/completions", async (c: any) => {
             latency_ms: latencyMs,
             routing_strategy: routingStrategy,
             cache: false,
+            ...(resolvedPromptMeta ? { prompt: resolvedPromptMeta } : {}),
           },
         }
 
@@ -528,6 +581,8 @@ completionsRouter.post("/chat/completions", async (c: any) => {
           requestedModel: req.model, resolvedModel: modelId, provider: provider.id,
           inputTokens, outputTokens, latencyMs, streaming: false, status: "success",
           costUsd: cost.costUsd, costInr: cost.costInr,
+          promptId: resolvedPromptMeta?.id ?? null,
+          promptVersion: resolvedPromptMeta?.version ?? null,
         })
 
         span.end()
@@ -556,6 +611,8 @@ completionsRouter.post("/chat/completions", async (c: any) => {
           requestedModel: req.model, resolvedModel: req.model, provider: lastProvider,
           latencyMs, streaming: false, status: "error",
           errorMessage: err instanceof Error ? err.message : String(err),
+          promptId: resolvedPromptMeta?.id ?? null,
+          promptVersion: resolvedPromptMeta?.version ?? null,
         })
 
         logger.error({ err, requestId, tenantId, modelChain }, "all models in chain failed")
@@ -687,6 +744,8 @@ completionsRouter.post("/chat/completions", async (c: any) => {
             requestedModel: req.model, resolvedModel: req.model,
             provider: failedProviderId, latencyMs: Date.now() - startTime,
             streaming: true, status: "error", errorMessage: error,
+            promptId: resolvedPromptMeta?.id ?? null,
+            promptVersion: resolvedPromptMeta?.version ?? null,
           })
 
           spanError(span, err)
@@ -779,6 +838,8 @@ completionsRouter.post("/chat/completions", async (c: any) => {
             requestedModel: req.model, resolvedModel: modelId, provider: providerId,
             inputTokens, outputTokens, latencyMs, streaming: true, status: "success",
             costUsd: cost.costUsd, costInr: cost.costInr,
+            promptId: resolvedPromptMeta?.id ?? null,
+            promptVersion: resolvedPromptMeta?.version ?? null,
           })
         } catch (err) {
           if (timeoutHandle) clearTimeout(timeoutHandle)
@@ -797,6 +858,8 @@ completionsRouter.post("/chat/completions", async (c: any) => {
             requestedModel: req.model, resolvedModel: modelId, provider: providerId,
             latencyMs: Date.now() - startTime, streaming: true, status: "error",
             errorMessage: err instanceof Error ? err.message : String(err),
+            promptId: resolvedPromptMeta?.id ?? null,
+            promptVersion: resolvedPromptMeta?.version ?? null,
           })
         } finally {
           activeCompletions.dec()

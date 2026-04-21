@@ -23,8 +23,11 @@ Thumbs.db
 scripts/
 assets/screenshots/
 
-# Claude Code local settings
-.claude/
+# Claude Code — commit shared agents/skills/AGENTS.md; ignore local-only files
+.claude/*
+!.claude/agents/
+!.claude/skills/
+!.claude/AGENTS.md
 
 # npm pack smoke artifacts
 *.tgz

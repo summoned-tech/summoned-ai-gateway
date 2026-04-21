@@ -38,6 +38,7 @@ import { embeddingsRouter } from "@/routers/embeddings"
 import { keysRouter } from "@/routers/keys"
 import { adminRouter } from "@/routers/admin"
 import { virtualKeysRouter } from "@/routers/virtual-keys"
+import { promptsRouter } from "@/routers/prompts"
 import { registry } from "@/providers/registry"
 import { subscribe, getRecentLogs } from "@/lib/log-buffer"
 
@@ -79,6 +80,7 @@ const consoleApi = new Hono()
 consoleApi.use("*", adminRateLimitMiddleware)
 consoleApi.route("/", adminRouter)
 consoleApi.route("/virtual-keys", virtualKeysRouter)
+consoleApi.route("/prompts", promptsRouter)
 consoleApi.route("/keys", keysRouter)
 app.route("/console/api", consoleApi)
 
@@ -112,6 +114,7 @@ app.route("/v1", v1)
 app.use("/admin/*", adminRateLimitMiddleware)
 app.route("/admin", adminRouter)
 app.route("/admin/virtual-keys", virtualKeysRouter)
+app.route("/admin/prompts", promptsRouter)
 
 // WebSocket `/ws/logs` is wired through the runtime adapter at boot
 // (see `startServer` call below) — not as a Hono GET handler here,
